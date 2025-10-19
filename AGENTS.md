@@ -14,6 +14,8 @@
 - Use React+NodeJs for frontend
 - Use postgresql+timescaleDB for data storage
 - python-okx 0.4.0 is the python library for API usage
+- Use sqlalchemy as ORM
+    - Keep db versioning
 
 # Project Steps
 
@@ -39,12 +41,15 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- Place application code under `src/AgentTest` using one project per service or agent.
 - Shared libraries go in `src/Common`. 
-- Integration and unit tests belong in `tests/AgentTest.Tests`. 
 - Config files and JSON fixtures live in `resources/`. 
-- Keep sensitive environment values outside source control; copy `resources/.env.example` to `resources/.env` locally.
+- Keep sensitive environment values outside source control;
+    - Use `resources/.env` and keep it locally.
 - Keep generated artifacts out of source control by adding them to `.gitignore`.
+- Source python code live in src folder
+    - API helper files should be in src/api
+    - DB helper files should be in src/db
+    - DB poco classes should be in src/db/poco
 
 ## Coding Style & Naming Conventions
 - Follow standard Python style (PEP 8):
@@ -53,12 +58,6 @@
     - ALL_CAPS only for constants and environment variables.
 - Keep files encoded as UTF-8.
 - Limit agents to single-responsibility classes and document public APIs with docstrings.
-
-## Testing Guidelines
-- Use pytest for unit tests in `tests/AgentTest.Tests` following the `test_<subject>_should_<expected_behavior>` naming pattern.
-- Mirror the production package structure under `tests/` to simplify discovery.
-- Place integration tests that touch external services in `tests/AgentTest.Integration`.
-- Target at least 80% line coverage for new modules and document any justified gaps in the pull request description.
 
 ## Commit & Pull Request Guidelines
 - Use Conventional Commit prefixes (e.g., `feat:`, `fix:`, `chore:`) and keep subject lines under 72 characters. 

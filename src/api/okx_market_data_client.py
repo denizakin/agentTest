@@ -1,7 +1,6 @@
 """OKX market data client responsible for candlestick retrieval."""
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, Optional
 
 try:
@@ -18,7 +17,13 @@ class OkxApiError(RuntimeError):
 
 
 class OkxMarketDataClient:
-    """High level helper for OKX candlestick (k-line) queries."""
+    """High level helper for OKX candlestick (k-line) queries.
+
+    Reads OKX credentials and environment flag from the central config
+    module (see ``src/config.py``). Ensure ``load_env_file`` is
+    able to read ``resources/.env`` or the variables are present in the
+    process environment.
+    """
 
     def __init__(
         self,
@@ -26,7 +31,6 @@ class OkxMarketDataClient:
         secret_key: Optional[str] = None,
         passphrase: Optional[str] = None,
         flag: Optional[str] = None,
-        market_api: Optional[Any] = None,
     ) -> None:
         """
         Create a new OKX market data client.
@@ -36,24 +40,19 @@ class OkxMarketDataClient:
             secret_key: Optional API secret. Defaults to OKX_SECRET_KEY env var.
             passphrase: Optional passphrase. Defaults to OKX_PASSPHRASE env var.
             flag: Trading flag (0=real, 1=test). Defaults to "0".
-            market_api: Injected python-okx MarketAPI instance, mainly for tests.
         """
-        try:
-            from config import load_env_file, get_env  # type: ignore
-        except ImportError:
-            load_env_file = lambda *_args, **_kwargs: None  # type: ignore
-
-            def get_env(name: str, default: Optional[str] = None) -> Optional[str]:
-                return os.getenv(name, default)
+        # Enforce using central config for env values
+        from config import load_env_file, get_okx_api_config  # type: ignore
 
         load_env_file()
+        okx_cfg = get_okx_api_config()
 
-        self.api_key = api_key or get_env("OKX_API_KEY")
-        self.secret_key = secret_key or get_env("OKX_SECRET_KEY")
-        self.passphrase = passphrase or get_env("OKX_PASSPHRASE")
-        env_flag = get_env("OKX_FLAG")
-        self.flag = flag if flag is not None else env_flag or "0"
-        self._market_api = market_api or self._build_market_api()
+        self.api_key = api_key or okx_cfg.get("OKX_API_KEY")
+        self.secret_key = secret_key or okx_cfg.get("OKX_SECRET_KEY")
+        self.passphrase = passphrase or okx_cfg.get("OKX_PASSPHRASE")
+        env_flag = okx_cfg.get("OKX_FLAG")
+        self.flag = flag if flag is not None else (env_flag or "0")
+        self._market_api = self._build_market_api()
 
     def get_candlesticks(
         self,
