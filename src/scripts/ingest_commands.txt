@@ -1,0 +1,1 @@
+python src/main_ingest.py --inst ETH-USDT --bar 1m --since 2014-12-31 --max-rows 30000000 --limit 300 --sleep 0.25 --retries 5 --backoff 0.25 --backoff-mult 2
