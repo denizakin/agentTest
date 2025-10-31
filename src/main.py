@@ -46,8 +46,8 @@ def main() -> int:
         print(f"Error fetching candlesticks: {exc}")
         return 1
 
-    print("Raw response JSON:")
-    print(json.dumps(resp, indent=2, ensure_ascii=False))
+    #print("Raw response JSON:")
+    #print(json.dumps(resp, indent=2, ensure_ascii=False))
 
     data = resp.get("data") or []
     if data:

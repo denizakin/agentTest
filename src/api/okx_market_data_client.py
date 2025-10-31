@@ -113,3 +113,51 @@ class OkxMarketDataClient:
             passphrase=self.passphrase,
             flag=self.flag,
         )
+
+    def get_history_candlesticks(
+        self,
+        instrument_id: str,
+        bar: str = "1m",
+        limit: int = 100,
+        before: Optional[str] = None,
+        after: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Retrieve historical candlesticks using OKX history endpoint.
+
+        Some OKX endpoints only page through ~1440 candles. The history
+        endpoint reaches further back. This method attempts to call the
+        appropriate python-okx function dynamically.
+        """
+        params: Dict[str, Any] = {
+            "instId": instrument_id,
+            "bar": bar,
+            "limit": str(limit),
+        }
+        if before:
+            params["before"] = str(before)
+        if after:
+            params["after"] = str(after)
+
+        # Try possible method names across python-okx variants
+        method_name = None
+        for name in ("get_history_candlesticks", "get_candlesticks_history", "get_history_candles"):
+            if hasattr(self._market_api, name):
+                method_name = name
+                break
+        if not method_name:
+            raise OkxApiError(
+                "OKX history candles method not found in python-okx MarketAPI."
+            )
+
+        try:
+            func = getattr(self._market_api, method_name)
+            response = func(**params)
+        except Exception as exc:
+            raise OkxApiError(f"Failed to retrieve history candlesticks: {exc}") from exc
+
+        if isinstance(response, dict):
+            code = response.get("code")
+            if code not in (None, "0", 0):
+                message = response.get("msg") or response.get("message") or "unknown error"
+                raise OkxApiError(f"OKX API error {code}: {message}")
+        return response
