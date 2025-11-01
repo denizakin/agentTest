@@ -22,14 +22,16 @@
 ## Data gathering
 - Use candlestick data
 
-## Data evaluation
-- To be determined later
+## Data evaluation and create strategies
+- Strategies will be written manually n the first phase
+- Use scikit-learn library for strategy generation
 
 ## Back testing for found strategies
-- To be determined later
+- Use backtrader python package
+- Use backtrader[plotting] for plotting capabilities
 
 ## Strategy optimization
-- To be determined later
+- Use backtrader for optimization
 
 ## Live trading
 - To be determined later
@@ -50,6 +52,7 @@
     - API helper files should be in src/api
     - DB helper files should be in src/db
     - DB poco classes should be in src/db/poco
+- Strategy classes should be in src/strategies
 
 ## Coding Style & Naming Conventions
 - Follow standard Python style (PEP 8):
