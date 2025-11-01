@@ -103,6 +103,14 @@ def _fetch_df(db: DbConn, inst: str, tf: str, since: Optional[datetime], until: 
     df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
     # Normalize to UTC naive datetimes for Backtrader
     df["ts"] = pd.to_datetime(df["ts"], utc=True).dt.tz_convert("UTC").dt.tz_localize(None)
+
+    # Ensure numeric columns are float (handle Decimal/str -> float); drop rows with NaNs after coercion
+    for col in ("open", "high", "low", "close", "volume"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
+
+    # De-dup on timestamp just in case and keep first occurrence
+    df = df.drop_duplicates(subset=["ts"]).sort_values("ts", ascending=True).reset_index(drop=True)
     return df
 
 
@@ -192,4 +200,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
