@@ -115,7 +115,8 @@ def _fetch_df(db: DbConn, inst: str, tf: str, since: Optional[datetime], until: 
 
 
 def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str], cash: float, commission: float,
-                 stake: int, fast: int, slow: int, plot: bool, refresh: bool) -> int:
+                 stake: int, fast: int, slow: int, plot: bool, refresh: bool,
+                 use_sizer: bool, coc: bool) -> int:
     load_env_file()
     db = DbConn()
 
@@ -132,6 +133,8 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
     if df.empty:
         print("No data returned for the given parameters.")
         return 1
+    else:
+        print(f"Loaded {len(df)} bars from {df['ts'].iloc[0]} to {df['ts'].iloc[-1]}")
 
     data = bt.feeds.PandasData(
         dataname=df,
@@ -148,7 +151,9 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
     cerebro.adddata(data)
     cerebro.broker.setcash(float(cash))
     cerebro.broker.setcommission(commission=float(commission))
-    cerebro.addsizer(bt.sizers.FixedSize, stake=int(stake))
+    cerebro.broker.set_coc(bool(coc))
+    if use_sizer:
+        cerebro.addsizer(bt.sizers.FixedSize, stake=int(stake))
     cerebro.addstrategy(SimpleSmaStrategy, fast=int(fast), slow=int(slow))
 
     start_val = cerebro.broker.getvalue()
@@ -178,6 +183,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--slow", type=int, default=20, help="Slow SMA period")
     p.add_argument("--plot", action="store_true", help="Plot results (requires display)")
     p.add_argument("--refresh", action="store_true", help="Refresh MV concurrently before fetching (tf != 1m)")
+    p.add_argument("--use-sizer", action="store_true", help="Use FixedSize sizer (not needed for target-% orders)")
+    p.add_argument("--coc", action="store_true", help="Cheat-on-close: fill market orders on same bar")
     return p.parse_args()
 
 
@@ -195,6 +202,8 @@ def main() -> int:
         slow=int(args.slow),
         plot=bool(args.plot),
         refresh=bool(args.refresh),
+        use_sizer=bool(args.use_sizer),
+        coc=bool(args.coc),
     )
 
 
