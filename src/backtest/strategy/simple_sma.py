@@ -15,8 +15,9 @@ class SimpleSmaStrategy(bt.Strategy):
         fast=10,
         slow=20,
         printlog=True,
-        invest=0.95,  # target portfolio percent on long entries
-        use_target=True,  # use order_target_percent for sizing
+        invest=0.95,  # invest % of available cash on buys
+        use_target=False,  # default to explicit size for reliability
+        min_size=1e-6,  # avoid zero-size due to rounding
     )
 
     def __init__(self) -> None:
@@ -35,6 +36,7 @@ class SimpleSmaStrategy(bt.Strategy):
     # ----- Backtrader notifications -----
     def notify_order(self, order):
         if order.status in [order.Submitted, order.Accepted]:
+            self.log(f"ORDER {order.getstatusname()} id={order.ref} size={order.created.size}")
             return
         if order.status == order.Completed:
             side = "BUY" if order.isbuy() else "SELL"
@@ -43,7 +45,9 @@ class SimpleSmaStrategy(bt.Strategy):
                 f"cost={order.executed.value:.2f}, comm={order.executed.comm:.2f}"
             )
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
-            self.log(f"ORDER {order.getstatusname().upper()} for size={order.executed.size:.6f}")
+            self.log(
+                f"ORDER {order.getstatusname().upper()} id={order.ref} created_size={order.created.size} executed_size={order.executed.size}"
+            )
         self.order = None
 
     def notify_trade(self, trade):
@@ -64,16 +68,25 @@ class SimpleSmaStrategy(bt.Strategy):
             self.log(f"SIGNAL BUY (cross up) @ close={price:.2f}")
             if self.p.use_target:
                 self.order = self.order_target_percent(target=float(self.p.invest))
+                self.log(f"order_target_percent to {self.p.invest*100:.1f}% -> order={self.order}")
             else:
-                # fallback: size ~ invest% of cash / price
                 cash = float(self.broker.getcash())
                 size = (cash * float(self.p.invest)) / float(price) if price else 0.0
+                if size < float(self.p.min_size):
+                    size = float(self.p.min_size)
+                self.log(f"BUY attempt: cash={cash:.2f} price={price:.2f} size={size:.8f}")
                 self.order = self.buy(size=size)
         elif cross < 0:
             self.log(f"SIGNAL SELL (cross down) @ close={price:.2f}")
             if self.p.use_target:
                 # reduce exposure to 0% (flat)
                 self.order = self.order_target_percent(target=0.0)
+                self.log(f"order_target_percent to 0% -> order={self.order}")
             else:
                 if self.position.size > 0:
-                    self.order = self.sell(size=self.position.size)
+                    self.log(f"CLOSE position size={self.position.size}")
+                    self.order = self.close()
+
+    def notify_cashvalue(self, cash, value):
+        # track portfolio changes
+        self.log(f"CASH/VALUE updated: cash={cash:.2f} value={value:.2f}")
