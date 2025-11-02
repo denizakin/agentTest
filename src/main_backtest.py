@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Tuple, Dict, Any
 
 import pandas as pd
 import backtrader as bt
@@ -114,9 +114,85 @@ def _fetch_df(db: DbConn, inst: str, tf: str, since: Optional[datetime], until: 
     return df
 
 
+def _fmt(x, nd: int = 2) -> str:
+    try:
+        return f"{float(x):.{nd}f}"
+    except Exception:
+        return "n/a"
+
+
+def run_once(df_in: pd.DataFrame, strat_name: str, params: Dict[str, Any], *,
+             cash: float, commission: float, coc: bool, use_sizer: bool, stake: int,
+             do_plot: bool = False) -> float:
+    cerebro = bt.Cerebro()
+    datafeed = bt.feeds.PandasData(
+        dataname=df_in,
+        datetime="ts",
+        open="open",
+        high="high",
+        low="low",
+        close="close",
+        volume="volume",
+        openinterest=None,
+    )
+    cerebro.adddata(datafeed)
+    cerebro.broker.setcash(float(cash))
+    cerebro.broker.setcommission(commission=float(commission))
+    cerebro.broker.set_coc(bool(coc))
+    if use_sizer:
+        cerebro.addsizer(bt.sizers.FixedSize, stake=int(stake))
+    from backtest.strategies.registry import get_strategy  # local import for multiprocessing safety
+    StrategyCls = get_strategy(strat_name)
+    allowed = {}
+    try:
+        allowed_keys = set(getattr(StrategyCls, "params", {}).keys())
+        allowed = {k: v for k, v in params.items() if k in allowed_keys}
+    except Exception:
+        allowed = params
+    cerebro.addstrategy(StrategyCls, **allowed)
+
+    # Analyzers
+    cerebro.addanalyzer(bt.analyzers.SharpeRatio_A, _name="sharpe")
+    cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
+    cerebro.addanalyzer(bt.analyzers.SQN, _name="sqn")
+    cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
+
+    start_val = cerebro.broker.getvalue()
+    print(f"[{strat_name}] Starting Value: {start_val:.2f}")
+    results = cerebro.run()
+    end_val = cerebro.broker.getvalue()
+    print(f"[{strat_name}] Final Value:    {end_val:.2f}")
+
+    # Analyzer summaries
+    try:
+        s = results[0].analyzers.sharpe.get_analysis()  # type: ignore[attr-defined]
+        dd = results[0].analyzers.drawdown.get_analysis()  # type: ignore[attr-defined]
+        sq = results[0].analyzers.sqn.get_analysis()  # type: ignore[attr-defined]
+        ta = results[0].analyzers.trades.get_analysis()  # type: ignore[attr-defined]
+        print(f"[{strat_name}] Sharpe: {_fmt(s.get('sharperatio'))}")
+        maxdd = (dd.get('max') or {}).get('drawdown') if isinstance(dd, dict) else None
+        print(f"[{strat_name}] MaxDD:  {_fmt(maxdd)}%")
+        print(f"[{strat_name}] SQN:    {_fmt(sq.get('sqn'))}")
+        total_closed = ((ta.get('total') or {}).get('closed') if isinstance(ta, dict) else None) or 0
+        won_total = ((ta.get('won') or {}).get('total') if isinstance(ta, dict) else None) or 0
+        lost_total = ((ta.get('lost') or {}).get('total') if isinstance(ta, dict) else None) or 0
+        pnl_net_total = (((ta.get('pnl') or {}).get('net') or {}).get('total') if isinstance(ta, dict) else None)
+        print(f"[{strat_name}] Trades: closed={total_closed} won={won_total} lost={lost_total} pnl_net={_fmt(pnl_net_total)}")
+    except Exception as exc:
+        print(f"[{strat_name}] Analyzer summary unavailable: {exc}")
+
+    if do_plot:
+        try:
+            cerebro.plot(style="candlestick")
+        except Exception as exc:
+            print(f"Plotting failed: {exc}")
+    return float(end_val)
+
+
 def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str], cash: float, commission: float,
                  stake: int, plot: bool, refresh: bool, use_sizer: bool, coc: bool,
-                 strategy_name: str, strat_params: dict, baseline: bool = True) -> int:
+                 strategy_name: str, strat_params: dict, baseline: bool = True,
+                 parallel_baseline: bool = False) -> int:
     load_env_file()
     db = DbConn()
 
@@ -147,93 +223,37 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
         openinterest=None,
     )
 
-    def _fmt(x, nd=2):
-        try:
-            return f"{float(x):.{nd}f}"
-        except Exception:
-            return "n/a"
-
-    def _run_once(df_in: pd.DataFrame, strat_name: str, params: dict, do_plot: bool = False) -> float:
-        cerebro = bt.Cerebro()
-        datafeed = bt.feeds.PandasData(
-            dataname=df_in,
-            datetime="ts",
-            open="open",
-            high="high",
-            low="low",
-            close="close",
-            volume="volume",
-            openinterest=None,
-        )
-        cerebro.adddata(datafeed)
-        cerebro.broker.setcash(float(cash))
-        cerebro.broker.setcommission(commission=float(commission))
-        cerebro.broker.set_coc(bool(coc))
-        if use_sizer:
-            cerebro.addsizer(bt.sizers.FixedSize, stake=int(stake))
-        StrategyCls = get_strategy(strat_name)
-        allowed = {}
-        try:
-            allowed_keys = set(getattr(StrategyCls, "params", {}).keys())
-            allowed = {k: v for k, v in params.items() if k in allowed_keys}
-        except Exception:
-            allowed = params
-        strat = cerebro.addstrategy(StrategyCls, **allowed)
-
-        # Add analyzers
-        cerebro.addanalyzer(bt.analyzers.SharpeRatio_A, _name="sharpe")
-        cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
-        cerebro.addanalyzer(bt.analyzers.SQN, _name="sqn")
-        cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
-
-        start_val = cerebro.broker.getvalue()
-        print(f"[{strat_name}] Starting Value: {start_val:.2f}")
-        results = cerebro.run()
-        end_val = cerebro.broker.getvalue()
-        print(f"[{strat_name}] Final Value:    {end_val:.2f}")
-
-        # Analyzer summaries
-        try:
-            s = results[0].analyzers.sharpe.get_analysis()  # type: ignore[attr-defined]
-            dd = results[0].analyzers.drawdown.get_analysis()  # type: ignore[attr-defined]
-            sq = results[0].analyzers.sqn.get_analysis()  # type: ignore[attr-defined]
-            ta = results[0].analyzers.trades.get_analysis()  # type: ignore[attr-defined]
-
-            print(f"[{strat_name}] Sharpe: {_fmt(s.get('sharperatio'))}")
-            maxdd = (dd.get('max') or {}).get('drawdown') if isinstance(dd, dict) else None
-            print(f"[{strat_name}] MaxDD:  {_fmt(maxdd)}%")
-            print(f"[{strat_name}] SQN:    {_fmt(sq.get('sqn'))}")
-
-            total_closed = ((ta.get('total') or {}).get('closed') if isinstance(ta, dict) else None) or 0
-            won_total = ((ta.get('won') or {}).get('total') if isinstance(ta, dict) else None) or 0
-            lost_total = ((ta.get('lost') or {}).get('total') if isinstance(ta, dict) else None) or 0
-            pnl_net_total = (((ta.get('pnl') or {}).get('net') or {}).get('total') if isinstance(ta, dict) else None)
-            print(f"[{strat_name}] Trades: closed={total_closed} won={won_total} lost={lost_total} pnl_net={_fmt(pnl_net_total)}")
-        except Exception as exc:
-            print(f"[{strat_name}] Analyzer summary unavailable: {exc}")
-
-        if do_plot:
-            try:
-                cerebro.plot(style="candlestick")
-            except Exception as exc:
-                print(f"Plotting failed: {exc}")
-        return float(end_val)
-
     # Main strategy run
-    end_main = _run_once(df, strategy_name, strat_params, do_plot=bool(plot))
+    end_main = run_once(df, strategy_name, strat_params,
+                        cash=cash, commission=commission, coc=coc,
+                        use_sizer=use_sizer, stake=stake, do_plot=bool(plot))
 
-    # Baseline buy&hold as separate run
+    # Baseline buy&hold as separate run (optionally parallel)
     if baseline:
-        try:
-            end_bh = _run_once(df, "buyhold", params={}, do_plot=False)
-            diff = end_main - end_bh
-            pct = (diff / end_bh * 100.0) if end_bh else 0.0
-            print("\nComparison vs Buy&Hold:")
-            print(f"  Buy&Hold: {end_bh:.2f}")
-            print(f"  Strategy: {end_main:.2f}")
-            print(f"  Edge:     {diff:+.2f} ({pct:+.2f}%)")
-        except Exception as exc:
-            print(f"Baseline (buy&hold) run failed: {exc}")
+        if parallel_baseline:
+            try:
+                from concurrent.futures import ProcessPoolExecutor
+                with ProcessPoolExecutor(max_workers=2) as ex:
+                    fut = ex.submit(
+                        run_once, df, "buyhold", {},
+                        cash=cash, commission=commission, coc=coc,
+                        use_sizer=use_sizer, stake=stake, do_plot=False,
+                    )
+                    end_bh = float(fut.result())
+            except Exception as exc:
+                print(f"Parallel baseline failed: {exc}; falling back to sequential.")
+                end_bh = run_once(df, "buyhold", {}, cash=cash, commission=commission, coc=coc,
+                                  use_sizer=use_sizer, stake=stake, do_plot=False)
+        else:
+            end_bh = run_once(df, "buyhold", {}, cash=cash, commission=commission, coc=coc,
+                              use_sizer=use_sizer, stake=stake, do_plot=False)
+
+        diff = end_main - end_bh
+        pct = (diff / end_bh * 100.0) if end_bh else 0.0
+        print("\nComparison vs Buy&Hold:")
+        print(f"  Buy&Hold: {end_bh:.2f}")
+        print(f"  Strategy: {end_main:.2f}")
+        print(f"  Edge:     {diff:+.2f} ({pct:+.2f}%)")
 
     return 0
 
@@ -282,6 +302,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--use-sizer", action="store_true", help="Use FixedSize sizer (not needed for target-% orders)")
     p.add_argument("--coc", action="store_true", help="Cheat-on-close: fill market orders on same bar")
     p.add_argument("--no-baseline", action="store_true", help="Skip Buy&Hold baseline run")
+    p.add_argument("--parallel-baseline", action="store_true", help="Run Buy&Hold baseline in a parallel process")
     # Strategy selection and parameters
     p.add_argument("--strategy", default="sma", help=f"Strategy name. Available: {available_strategies()}")
     p.add_argument(
@@ -318,6 +339,7 @@ def main() -> int:
         strategy_name=str(args.strategy),
         strat_params=strat_params,
         baseline=not bool(args.no_baseline),
+        parallel_baseline=bool(args.parallel_baseline),
     )
 
 
