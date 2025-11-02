@@ -123,6 +123,7 @@ def _fmt(x, nd: int = 2) -> str:
 
 def run_once(df_in: pd.DataFrame, strat_name: str, params: Dict[str, Any], *,
              cash: float, commission: float, coc: bool, use_sizer: bool, stake: int,
+             slip_perc: float = 0.0, slip_fixed: float = 0.0, slip_open: bool = True,
              do_plot: bool = False) -> float:
     cerebro = bt.Cerebro()
     datafeed = bt.feeds.PandasData(
@@ -138,6 +139,11 @@ def run_once(df_in: pd.DataFrame, strat_name: str, params: Dict[str, Any], *,
     cerebro.adddata(datafeed)
     cerebro.broker.setcash(float(cash))
     cerebro.broker.setcommission(commission=float(commission))
+    # Configure slippage (percentage takes precedence over fixed)
+    if float(slip_perc) > 0.0:
+        cerebro.broker.set_slippage_perc(perc=float(slip_perc), slip_open=bool(slip_open))
+    elif float(slip_fixed) > 0.0:
+        cerebro.broker.set_slippage_fixed(fixed=float(slip_fixed), slip_open=bool(slip_open))
     cerebro.broker.set_coc(bool(coc))
     if use_sizer:
         cerebro.addsizer(bt.sizers.FixedSize, stake=int(stake))
@@ -192,7 +198,8 @@ def run_once(df_in: pd.DataFrame, strat_name: str, params: Dict[str, Any], *,
 def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str], cash: float, commission: float,
                  stake: int, plot: bool, refresh: bool, use_sizer: bool, coc: bool,
                  strategy_name: str, strat_params: dict, baseline: bool = True,
-                 parallel_baseline: bool = False) -> int:
+                 parallel_baseline: bool = False,
+                 slip_perc: float = 0.0, slip_fixed: float = 0.0, slip_open: bool = True) -> int:
     load_env_file()
     db = DbConn()
 
@@ -233,13 +240,17 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
                 fut = ex.submit(
                     run_once, df, "buyhold", {},
                     cash=cash, commission=commission, coc=coc,
-                    use_sizer=use_sizer, stake=stake, do_plot=False,
+                    use_sizer=use_sizer, stake=stake,
+                    slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+                    do_plot=False,
                 )
                 # Run main while baseline executes in parallel
                 end_main = run_once(
                     df, strategy_name, strat_params,
                     cash=cash, commission=commission, coc=coc,
-                    use_sizer=use_sizer, stake=stake, do_plot=bool(plot)
+                    use_sizer=use_sizer, stake=stake,
+                    slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+                    do_plot=bool(plot)
                 )
                 end_bh = float(fut.result())
         except Exception as exc:
@@ -247,25 +258,33 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
             end_main = run_once(
                 df, strategy_name, strat_params,
                 cash=cash, commission=commission, coc=coc,
-                use_sizer=use_sizer, stake=stake, do_plot=bool(plot)
+                use_sizer=use_sizer, stake=stake,
+                slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+                do_plot=bool(plot)
             )
             end_bh = run_once(
                 df, "buyhold", {},
                 cash=cash, commission=commission, coc=coc,
-                use_sizer=use_sizer, stake=stake, do_plot=False,
+                use_sizer=use_sizer, stake=stake,
+                slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+                do_plot=False,
             )
     else:
         # Sequential path or no baseline requested
         end_main = run_once(
             df, strategy_name, strat_params,
             cash=cash, commission=commission, coc=coc,
-            use_sizer=use_sizer, stake=stake, do_plot=bool(plot)
+            use_sizer=use_sizer, stake=stake,
+            slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+            do_plot=bool(plot)
         )
         if baseline:
             end_bh = run_once(
                 df, "buyhold", {},
                 cash=cash, commission=commission, coc=coc,
-                use_sizer=use_sizer, stake=stake, do_plot=False,
+                use_sizer=use_sizer, stake=stake,
+                slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+                do_plot=False,
             )
 
     if baseline:
@@ -324,6 +343,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--coc", action="store_true", help="Cheat-on-close: fill market orders on same bar")
     p.add_argument("--no-baseline", action="store_true", help="Skip Buy&Hold baseline run")
     p.add_argument("--parallel-baseline", action="store_true", help="Run Buy&Hold baseline in a parallel process")
+    # Fees & slippage
+    p.add_argument("--slip-perc", type=float, default=0.0, help="Price slippage as fraction (e.g., 0.0005 = 5 bps)")
+    p.add_argument("--slip-fixed", type=float, default=0.0, help="Fixed price slippage per fill (same units as price)")
+    p.add_argument("--no-slip-open", action="store_true", help="Do not apply slippage to open orders")
     # Strategy selection and parameters
     p.add_argument("--strategy", default="sma", help=f"Strategy name. Available: {available_strategies()}")
     p.add_argument(
@@ -361,6 +384,9 @@ def main() -> int:
         strat_params=strat_params,
         baseline=not bool(args.no_baseline),
         parallel_baseline=bool(args.parallel_baseline),
+        slip_perc=float(args.slip_perc),
+        slip_fixed=float(args.slip_fixed),
+        slip_open=not bool(args.no_slip_open),
     )
 
 
