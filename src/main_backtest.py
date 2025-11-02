@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 
 import pandas as pd
 import backtrader as bt
@@ -379,6 +379,23 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument("--list-strategies", action="store_true", help="List available strategy names and exit")
+    # Optimization (built-in Backtrader optstrategy)
+    p.add_argument("--optimize", action="store_true", help="Enable Backtrader optimization for the selected strategy")
+    p.add_argument(
+        "--opt-grid",
+        default="",
+        help=(
+            "Parameter grid as name=start:stop:step,comma-separated. "
+            "Example: fast=5:30:1,slow=10:60:5"
+        ),
+    )
+    p.add_argument("--opt-maxcpus", type=int, default=0, help="Max CPUs for optimization (0 = all cores)")
+    p.add_argument("--opt-top", type=int, default=10, help="Show top N results by final value")
+    p.add_argument(
+        "--opt-constraint",
+        default="",
+        help="Optional constraint expression using param names, e.g., fast<slow",
+    )
     return p.parse_args()
 
 
@@ -389,6 +406,23 @@ def main() -> int:
         print(available_strategies())
         return 0
     strat_params = _parse_kv_pairs(args.sp)
+    if args.optimize:
+        return run_optimize(
+            inst=str(args.inst),
+            tf=str(args.tf),
+            since=args.since,
+            until=args.until,
+            cash=float(args.cash),
+            commission=float(args.commission),
+            strategy_name=str(args.strategy),
+            grid_spec=str(args.opt_grid),
+            maxcpus=int(args.opt_maxcpus),
+            constraint=str(args.opt_constraint),
+            slip_perc=float(args.slip_perc),
+            slip_fixed=float(args.slip_fixed),
+            slip_open=not bool(args.no_slip_open),
+        )
+
     return run_backtest(
         inst=str(args.inst),
         tf=str(args.tf),
@@ -409,6 +443,188 @@ def main() -> int:
         slip_fixed=float(args.slip_fixed),
         slip_open=not bool(args.no_slip_open),
     )
+
+
+def _parse_grid(grid: str) -> Dict[str, List[int]]:
+    """Parse grid string like 'fast=5:30:1,slow=10:60:5' into dict of name -> list of ints.
+
+    Only integer ranges are supported. Inclusive stop is applied (like Python range with stop+step).
+    """
+    result: Dict[str, List[int]] = {}
+    if not grid:
+        return result
+    for item in grid.split(','):
+        item = item.strip()
+        if not item or '=' not in item:
+            continue
+        name, rng = item.split('=', 1)
+        name = name.strip()
+        parts = [p.strip() for p in rng.split(':')]
+        if len(parts) == 3 and all(p.lstrip('-').isdigit() for p in parts):
+            start, stop, step = map(int, parts)
+            if step == 0:
+                continue
+            vals = list(range(start, stop + (1 if (stop - start) * step >= 0 else -1), step))
+            result[name] = vals
+        else:
+            # fallback: single int
+            try:
+                result[name] = [int(rng)]
+            except ValueError:
+                pass
+    return result
+
+
+def _constraint_ok(params: Dict[str, Any], expr: str) -> bool:
+    if not expr:
+        return True
+    try:
+        # Evaluate with param dict as locals, no builtins
+        return bool(eval(expr, {"__builtins__": {}}, params))
+    except Exception:
+        return True
+
+
+def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str], cash: float, commission: float,
+                 strategy_name: str, grid_spec: str, maxcpus: int, constraint: str,
+                 slip_perc: float = 0.0, slip_fixed: float = 0.0, slip_open: bool = True) -> int:
+    load_env_file()
+    db = DbConn()
+
+    since_dt = _parse_time(since)
+    until_dt = _parse_time(until)
+
+    view = _tf_to_view(inst, tf)
+    if view is not None:
+        with db.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            # Do not block if MV not present; ignore errors
+            try:
+                conn.execute(text(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {view}"))
+            except Exception:
+                pass
+
+    df = _fetch_df(db, inst, tf, since_dt, until_dt)
+    if df.empty:
+        print("No data returned for the given parameters.")
+        return 1
+    else:
+        print(f"Loaded {len(df)} bars from {df['ts'].iloc[0]} to {df['ts'].iloc[-1]}")
+
+    grid = _parse_grid(grid_spec)
+    if not grid:
+        print("No optimization grid provided. Use --opt-grid, e.g., fast=5:30:1,slow=10:60:5")
+        return 2
+
+    # Set up Cerebro for optimization
+    cerebro = bt.Cerebro()
+    datafeed = bt.feeds.PandasData(
+        dataname=df,
+        datetime="ts",
+        open="open",
+        high="high",
+        low="low",
+        close="close",
+        volume="volume",
+        openinterest=None,
+    )
+    cerebro.adddata(datafeed)
+    cerebro.broker.setcash(float(cash))
+    cerebro.broker.setcommission(commission=float(commission))
+    if float(slip_perc) > 0.0:
+        cerebro.broker.set_slippage_perc(perc=float(slip_perc), slip_open=bool(slip_open))
+    elif float(slip_fixed) > 0.0:
+        cerebro.broker.set_slippage_fixed(fixed=float(slip_fixed), slip_open=bool(slip_open))
+
+    StrategyCls = get_strategy(strategy_name)
+    # Add analyzers to apply to each optimization run
+    cerebro.addanalyzer(bt.analyzers.SharpeRatio_A, _name="sharpe")
+    cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
+    cerebro.addanalyzer(bt.analyzers.SQN, _name="sqn")
+    cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
+
+    cerebro.optreturn = False  # return full strategy instances
+    cerebro.optstrategy(StrategyCls, **grid)
+    print(f"Starting optimization for '{strategy_name}' with grid: {grid}")
+    results = cerebro.run(maxcpus=int(maxcpus))
+
+    # Flatten and collect metrics
+    flat: List[bt.Strategy] = []
+    for res in results:
+        # res can be a list of 1 strategy instance
+        if isinstance(res, (list, tuple)) and res:
+            flat.append(res[0])
+        elif isinstance(res, bt.Strategy):
+            flat.append(res)
+
+    rows: List[Dict[str, Any]] = []
+    for strat in flat:
+        # Extract params for this run
+        p = getattr(strat, 'params', None)
+        p_dict = {}
+        if p is not None:
+            for k in dir(p):
+                if k.startswith('_'):
+                    continue
+                try:
+                    val = getattr(p, k)
+                except Exception:
+                    continue
+                if isinstance(val, (int, float, bool)):
+                    p_dict[k] = val
+
+        if not _constraint_ok(p_dict, constraint):
+            continue
+
+        # Metrics via analyzers
+        try:
+            s = strat.analyzers.sharpe.get_analysis()
+            dd = strat.analyzers.drawdown.get_analysis()
+            sq = strat.analyzers.sqn.get_analysis()
+            ta = strat.analyzers.trades.get_analysis()
+        except Exception:
+            continue
+
+        maxdd = (dd.get('max') or {}).get('drawdown') if isinstance(dd, dict) else None
+        total_closed = ((ta.get('total') or {}).get('closed') if isinstance(ta, dict) else None)
+        if total_closed is None:
+            total_closed = ((ta.get('strike') or {}).get('total') if isinstance(ta, dict) else 0) or 0
+        won_total = ((ta.get('won') or {}).get('total') if isinstance(ta, dict) else None)
+        if won_total is None:
+            won_total = ((ta.get('strike') or {}).get('won') if isinstance(ta, dict) else 0) or 0
+        gross_won = (((ta.get('won') or {}).get('pnl') or {}).get('total') if isinstance(ta, dict) else None)
+        gross_lost_signed = (((ta.get('lost') or {}).get('pnl') or {}).get('total') if isinstance(ta, dict) else None)
+        gross_lost = abs(float(gross_lost_signed)) if gross_lost_signed not in (None, 0) else 0.0
+        profit_factor = (float(gross_won) / gross_lost) if gross_won is not None and gross_lost > 0 else None
+        win_rate = (won_total / total_closed * 100.0) if total_closed else None
+
+        try:
+            final_value = float(strat.broker.getvalue())
+        except Exception:
+            final_value = float('nan')
+
+        rows.append({
+            'params': p_dict,
+            'final': final_value,
+            'sharpe': s.get('sharperatio') if isinstance(s, dict) else None,
+            'maxdd': maxdd,
+            'winrate': win_rate,
+            'pf': profit_factor,
+        })
+
+    if not rows:
+        print("No optimization results collected (possibly due to constraint or failures).")
+        return 3
+
+    rows.sort(key=lambda r: (r['final'] if r['final'] is not None else float('-inf')), reverse=True)
+    topn = max(1, int(min(len(rows),  int(args.opt_top) if 'args' in globals() else 10)))
+    print(f"\nTop {topn} results by Final Value:")
+    for i, r in enumerate(rows[:topn], 1):
+        print(
+            f"#{i} final={_fmt(r['final'])} sharpe={_fmt(r['sharpe'])} maxdd={_fmt(r['maxdd'])}% "
+            f"winrate={_fmt(r['winrate'])}% pf={_fmt(r['pf'], nd=3)} params={r['params']}"
+        )
+
+    return 0
 
 
 if __name__ == "__main__":
