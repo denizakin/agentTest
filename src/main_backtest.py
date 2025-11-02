@@ -175,15 +175,36 @@ def run_once(df_in: pd.DataFrame, strat_name: str, params: Dict[str, Any], *,
         dd = results[0].analyzers.drawdown.get_analysis()  # type: ignore[attr-defined]
         sq = results[0].analyzers.sqn.get_analysis()  # type: ignore[attr-defined]
         ta = results[0].analyzers.trades.get_analysis()  # type: ignore[attr-defined]
+
         print(f"[{strat_name}] Sharpe: {_fmt(s.get('sharperatio'))}")
         maxdd = (dd.get('max') or {}).get('drawdown') if isinstance(dd, dict) else None
         print(f"[{strat_name}] MaxDD:  {_fmt(maxdd)}%")
         print(f"[{strat_name}] SQN:    {_fmt(sq.get('sqn'))}")
-        total_closed = ((ta.get('total') or {}).get('closed') if isinstance(ta, dict) else None) or 0
-        won_total = ((ta.get('won') or {}).get('total') if isinstance(ta, dict) else None) or 0
-        lost_total = ((ta.get('lost') or {}).get('total') if isinstance(ta, dict) else None) or 0
+
+        # Extract trade counts
+        total_closed = ((ta.get('total') or {}).get('closed') if isinstance(ta, dict) else None)
+        if total_closed is None:
+            total_closed = ((ta.get('strike') or {}).get('total') if isinstance(ta, dict) else 0) or 0
+        won_total = ((ta.get('won') or {}).get('total') if isinstance(ta, dict) else None)
+        if won_total is None:
+            won_total = ((ta.get('strike') or {}).get('won') if isinstance(ta, dict) else 0) or 0
+        lost_total = ((ta.get('lost') or {}).get('total') if isinstance(ta, dict) else None)
+        if lost_total is None:
+            lost_total = ((ta.get('strike') or {}).get('lost') if isinstance(ta, dict) else 0) or 0
+
+        # Win rate
+        win_rate = (won_total / total_closed * 100.0) if total_closed else None
+
+        # Profit factor: gross profits / gross losses
+        gross_won = (((ta.get('won') or {}).get('pnl') or {}).get('total') if isinstance(ta, dict) else None)
+        gross_lost_signed = (((ta.get('lost') or {}).get('pnl') or {}).get('total') if isinstance(ta, dict) else None)
+        gross_lost = abs(float(gross_lost_signed)) if gross_lost_signed not in (None, 0) else 0.0
+        profit_factor = (float(gross_won) / gross_lost) if gross_won is not None and gross_lost > 0 else None
+
         pnl_net_total = (((ta.get('pnl') or {}).get('net') or {}).get('total') if isinstance(ta, dict) else None)
-        print(f"[{strat_name}] Trades: closed={total_closed} won={won_total} lost={lost_total} pnl_net={_fmt(pnl_net_total)}")
+
+        print(f"[{strat_name}] Trades: closed={int(total_closed)} won={int(won_total)} lost={int(lost_total)} pnl_net={_fmt(pnl_net_total)}")
+        print(f"[{strat_name}] WinRate: {_fmt(win_rate)}%  ProfitFactor: {_fmt(profit_factor, nd=3)}")
     except Exception as exc:
         print(f"[{strat_name}] Analyzer summary unavailable: {exc}")
 
