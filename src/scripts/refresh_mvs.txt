@@ -1,0 +1,14 @@
+Added MV Refresh CLI
+
+src/main_refresh_mviews.py:1 — refreshes all BTC/ETH materialized views sequentially with concurrent or blocking mode.
+Usage
+
+All BTC & ETH (concurrent): python src/main_refresh_mviews.py
+Only BTC, 5m and 15m (blocking): python src/main_refresh_mviews.py --inst btc --tfs 5m,15m --blocking
+Enable SQL echo: --echo
+Behavior
+
+Supports timeframes: 5m, 15m, 1h, 4h, 1d, 1w, 1mo
+Orders refreshes from small to large windows
+Uses AUTOCOMMIT; concurrent mode avoids read locks
+Fails fast if any refresh errors

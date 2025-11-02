@@ -15,7 +15,7 @@ from sqlalchemy import text
 
 from config import load_env_file
 from db.db_conn import DbConn
-from backtest.strategy.simple_sma import SimpleSmaStrategy
+from backtest.strategies.registry import get_strategy, available_strategies
 
 
 def _parse_time(value: Optional[str]) -> Optional[datetime]:
@@ -115,8 +115,8 @@ def _fetch_df(db: DbConn, inst: str, tf: str, since: Optional[datetime], until: 
 
 
 def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str], cash: float, commission: float,
-                 stake: int, fast: int, slow: int, plot: bool, refresh: bool,
-                 use_sizer: bool, coc: bool) -> int:
+                 stake: int, plot: bool, refresh: bool, use_sizer: bool, coc: bool,
+                 strategy_name: str, strat_params: dict) -> int:
     load_env_file()
     db = DbConn()
 
@@ -154,7 +154,15 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
     cerebro.broker.set_coc(bool(coc))
     if use_sizer:
         cerebro.addsizer(bt.sizers.FixedSize, stake=int(stake))
-    cerebro.addstrategy(SimpleSmaStrategy, fast=int(fast), slow=int(slow))
+    StrategyCls = get_strategy(strategy_name)
+    # Filter params to those defined by the strategy (if possible)
+    allowed = {}
+    try:
+        allowed_keys = set(getattr(StrategyCls, "params", {}).keys())
+        allowed = {k: v for k, v in strat_params.items() if k in allowed_keys}
+    except Exception:
+        allowed = strat_params
+    cerebro.addstrategy(StrategyCls, **allowed)
 
     start_val = cerebro.broker.getvalue()
     print(f"Starting Portfolio Value: {start_val:.2f}")
@@ -170,6 +178,36 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
     return 0
 
 
+def _parse_kv_pairs(pairs: Optional[str]) -> dict:
+    """Parse comma-separated key=value pairs into a dict with basic type coercion."""
+    if not pairs:
+        return {}
+    out = {}
+    for item in pairs.split(','):
+        if not item:
+            continue
+        if '=' not in item:
+            continue
+        k, v = item.split('=', 1)
+        k = k.strip()
+        v = v.strip()
+        # basic type coercion
+        low = v.lower()
+        if low in ("true", "false"):
+            out[k] = (low == "true")
+            continue
+        try:
+            if '.' in v:
+                out[k] = float(v)
+            else:
+                out[k] = int(v)
+            continue
+        except ValueError:
+            pass
+        out[k] = v
+    return out
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run a simple Backtrader backtest from DB candles")
     p.add_argument("--inst", default="BTC-USDT", help="Instrument ID, e.g., BTC-USDT or ETH-USDT")
@@ -179,17 +217,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cash", type=float, default=10000.0)
     p.add_argument("--commission", type=float, default=0.001, help="Commission as fraction (e.g., 0.001 = 0.1%)")
     p.add_argument("--stake", type=int, default=1, help="Fixed position size in units")
-    p.add_argument("--fast", type=int, default=10, help="Fast SMA period")
-    p.add_argument("--slow", type=int, default=20, help="Slow SMA period")
     p.add_argument("--plot", action="store_true", help="Plot results (requires display)")
     p.add_argument("--refresh", action="store_true", help="Refresh MV concurrently before fetching (tf != 1m)")
     p.add_argument("--use-sizer", action="store_true", help="Use FixedSize sizer (not needed for target-% orders)")
     p.add_argument("--coc", action="store_true", help="Cheat-on-close: fill market orders on same bar")
+    # Strategy selection and parameters
+    p.add_argument("--strategy", default="sma", help=f"Strategy name. Available: {available_strategies()}")
+    p.add_argument(
+        "--sp",
+        default="",
+        help=(
+            "Comma-separated strategy params (key=value). "
+            "Example: fast=10,slow=20,invest=0.9,use_target=false"
+        ),
+    )
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    strat_params = _parse_kv_pairs(args.sp)
     return run_backtest(
         inst=str(args.inst),
         tf=str(args.tf),
@@ -198,12 +245,12 @@ def main() -> int:
         cash=float(args.cash),
         commission=float(args.commission),
         stake=int(args.stake),
-        fast=int(args.fast),
-        slow=int(args.slow),
         plot=bool(args.plot),
         refresh=bool(args.refresh),
         use_sizer=bool(args.use_sizer),
         coc=bool(args.coc),
+        strategy_name=str(args.strategy),
+        strat_params=strat_params,
     )
 
 
