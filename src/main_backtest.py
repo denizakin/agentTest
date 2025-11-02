@@ -223,31 +223,52 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
         openinterest=None,
     )
 
-    # Main strategy run
-    end_main = run_once(df, strategy_name, strat_params,
-                        cash=cash, commission=commission, coc=coc,
-                        use_sizer=use_sizer, stake=stake, do_plot=bool(plot))
+    end_main: float
+    end_bh: float = 0.0
+    # Baseline in parallel: start baseline first, then run main, then await baseline
+    if baseline and parallel_baseline:
+        try:
+            from concurrent.futures import ProcessPoolExecutor
+            with ProcessPoolExecutor(max_workers=2) as ex:
+                fut = ex.submit(
+                    run_once, df, "buyhold", {},
+                    cash=cash, commission=commission, coc=coc,
+                    use_sizer=use_sizer, stake=stake, do_plot=False,
+                )
+                # Run main while baseline executes in parallel
+                end_main = run_once(
+                    df, strategy_name, strat_params,
+                    cash=cash, commission=commission, coc=coc,
+                    use_sizer=use_sizer, stake=stake, do_plot=bool(plot)
+                )
+                end_bh = float(fut.result())
+        except Exception as exc:
+            print(f"Parallel baseline failed: {exc}; falling back to sequential.")
+            end_main = run_once(
+                df, strategy_name, strat_params,
+                cash=cash, commission=commission, coc=coc,
+                use_sizer=use_sizer, stake=stake, do_plot=bool(plot)
+            )
+            end_bh = run_once(
+                df, "buyhold", {},
+                cash=cash, commission=commission, coc=coc,
+                use_sizer=use_sizer, stake=stake, do_plot=False,
+            )
+    else:
+        # Sequential path or no baseline requested
+        end_main = run_once(
+            df, strategy_name, strat_params,
+            cash=cash, commission=commission, coc=coc,
+            use_sizer=use_sizer, stake=stake, do_plot=bool(plot)
+        )
+        if baseline:
+            end_bh = run_once(
+                df, "buyhold", {},
+                cash=cash, commission=commission, coc=coc,
+                use_sizer=use_sizer, stake=stake, do_plot=False,
+            )
 
-    # Baseline buy&hold as separate run (optionally parallel)
     if baseline:
-        if parallel_baseline:
-            try:
-                from concurrent.futures import ProcessPoolExecutor
-                with ProcessPoolExecutor(max_workers=2) as ex:
-                    fut = ex.submit(
-                        run_once, df, "buyhold", {},
-                        cash=cash, commission=commission, coc=coc,
-                        use_sizer=use_sizer, stake=stake, do_plot=False,
-                    )
-                    end_bh = float(fut.result())
-            except Exception as exc:
-                print(f"Parallel baseline failed: {exc}; falling back to sequential.")
-                end_bh = run_once(df, "buyhold", {}, cash=cash, commission=commission, coc=coc,
-                                  use_sizer=use_sizer, stake=stake, do_plot=False)
-        else:
-            end_bh = run_once(df, "buyhold", {}, cash=cash, commission=commission, coc=coc,
-                              use_sizer=use_sizer, stake=stake, do_plot=False)
-
         diff = end_main - end_bh
         pct = (diff / end_bh * 100.0) if end_bh else 0.0
         print("\nComparison vs Buy&Hold:")
