@@ -116,7 +116,7 @@ def _fetch_df(db: DbConn, inst: str, tf: str, since: Optional[datetime], until: 
 
 def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str], cash: float, commission: float,
                  stake: int, plot: bool, refresh: bool, use_sizer: bool, coc: bool,
-                 strategy_name: str, strat_params: dict) -> int:
+                 strategy_name: str, strat_params: dict, baseline: bool = True) -> int:
     load_env_file()
     db = DbConn()
 
@@ -147,34 +147,62 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
         openinterest=None,
     )
 
-    cerebro = bt.Cerebro()
-    cerebro.adddata(data)
-    cerebro.broker.setcash(float(cash))
-    cerebro.broker.setcommission(commission=float(commission))
-    cerebro.broker.set_coc(bool(coc))
-    if use_sizer:
-        cerebro.addsizer(bt.sizers.FixedSize, stake=int(stake))
-    StrategyCls = get_strategy(strategy_name)
-    # Filter params to those defined by the strategy (if possible)
-    allowed = {}
-    try:
-        allowed_keys = set(getattr(StrategyCls, "params", {}).keys())
-        allowed = {k: v for k, v in strat_params.items() if k in allowed_keys}
-    except Exception:
-        allowed = strat_params
-    cerebro.addstrategy(StrategyCls, **allowed)
-
-    start_val = cerebro.broker.getvalue()
-    print(f"Starting Portfolio Value: {start_val:.2f}")
-    cerebro.run()
-    end_val = cerebro.broker.getvalue()
-    print(f"Final Portfolio Value:    {end_val:.2f}")
-
-    if plot:
+    def _run_once(df_in: pd.DataFrame, strat_name: str, params: dict, do_plot: bool = False) -> float:
+        cerebro = bt.Cerebro()
+        datafeed = bt.feeds.PandasData(
+            dataname=df_in,
+            datetime="ts",
+            open="open",
+            high="high",
+            low="low",
+            close="close",
+            volume="volume",
+            openinterest=None,
+        )
+        cerebro.adddata(datafeed)
+        cerebro.broker.setcash(float(cash))
+        cerebro.broker.setcommission(commission=float(commission))
+        cerebro.broker.set_coc(bool(coc))
+        if use_sizer:
+            cerebro.addsizer(bt.sizers.FixedSize, stake=int(stake))
+        StrategyCls = get_strategy(strat_name)
+        allowed = {}
         try:
-            cerebro.plot(style="candlestick")
+            allowed_keys = set(getattr(StrategyCls, "params", {}).keys())
+            allowed = {k: v for k, v in params.items() if k in allowed_keys}
+        except Exception:
+            allowed = params
+        cerebro.addstrategy(StrategyCls, **allowed)
+
+        start_val = cerebro.broker.getvalue()
+        print(f"[{strat_name}] Starting Value: {start_val:.2f}")
+        cerebro.run()
+        end_val = cerebro.broker.getvalue()
+        print(f"[{strat_name}] Final Value:    {end_val:.2f}")
+
+        if do_plot:
+            try:
+                cerebro.plot(style="candlestick")
+            except Exception as exc:
+                print(f"Plotting failed: {exc}")
+        return float(end_val)
+
+    # Main strategy run
+    end_main = _run_once(df, strategy_name, strat_params, do_plot=bool(plot))
+
+    # Baseline buy&hold as separate run
+    if baseline:
+        try:
+            end_bh = _run_once(df, "buyhold", params={}, do_plot=False)
+            diff = end_main - end_bh
+            pct = (diff / end_bh * 100.0) if end_bh else 0.0
+            print("\nComparison vs Buy&Hold:")
+            print(f"  Buy&Hold: {end_bh:.2f}")
+            print(f"  Strategy: {end_main:.2f}")
+            print(f"  Edge:     {diff:+.2f} ({pct:+.2f}%)")
         except Exception as exc:
-            print(f"Plotting failed: {exc}")
+            print(f"Baseline (buy&hold) run failed: {exc}")
+
     return 0
 
 
@@ -221,6 +249,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--refresh", action="store_true", help="Refresh MV concurrently before fetching (tf != 1m)")
     p.add_argument("--use-sizer", action="store_true", help="Use FixedSize sizer (not needed for target-% orders)")
     p.add_argument("--coc", action="store_true", help="Cheat-on-close: fill market orders on same bar")
+    p.add_argument("--no-baseline", action="store_true", help="Skip Buy&Hold baseline run")
     # Strategy selection and parameters
     p.add_argument("--strategy", default="sma", help=f"Strategy name. Available: {available_strategies()}")
     p.add_argument(
@@ -256,6 +285,7 @@ def main() -> int:
         coc=bool(args.coc),
         strategy_name=str(args.strategy),
         strat_params=strat_params,
+        baseline=not bool(args.no_baseline),
     )
 
 
