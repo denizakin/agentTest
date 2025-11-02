@@ -231,11 +231,16 @@ def parse_args() -> argparse.Namespace:
             "Example: fast=10,slow=20,invest=0.9,use_target=false"
         ),
     )
+    p.add_argument("--list-strategies", action="store_true", help="List available strategy names and exit")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.list_strategies:
+        print("Available strategies:")
+        print(available_strategies())
+        return 0
     strat_params = _parse_kv_pairs(args.sp)
     return run_backtest(
         inst=str(args.inst),

@@ -6,11 +6,15 @@ import backtrader as bt
 
 # Import and register available strategies here
 from .simple_sma import SimpleSmaStrategy
+from .buy_hold import BuyHoldStrategy
+from .rsi_cross import RsiCrossStrategy
 
 
 STRATEGY_REGISTRY: Dict[str, Type[bt.Strategy]] = {
     # key: human-friendly name -> strategy class
     "sma": SimpleSmaStrategy,
+    "buyhold": BuyHoldStrategy,
+    "rsi": RsiCrossStrategy,
 }
 
 
@@ -23,4 +27,3 @@ def get_strategy(name: str) -> Type[bt.Strategy]:
 
 def available_strategies() -> str:
     return ", ".join(sorted(STRATEGY_REGISTRY))
-
