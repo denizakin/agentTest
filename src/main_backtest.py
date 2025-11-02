@@ -147,6 +147,12 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
         openinterest=None,
     )
 
+    def _fmt(x, nd=2):
+        try:
+            return f"{float(x):.{nd}f}"
+        except Exception:
+            return "n/a"
+
     def _run_once(df_in: pd.DataFrame, strat_name: str, params: dict, do_plot: bool = False) -> float:
         cerebro = bt.Cerebro()
         datafeed = bt.feeds.PandasData(
@@ -172,13 +178,39 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
             allowed = {k: v for k, v in params.items() if k in allowed_keys}
         except Exception:
             allowed = params
-        cerebro.addstrategy(StrategyCls, **allowed)
+        strat = cerebro.addstrategy(StrategyCls, **allowed)
+
+        # Add analyzers
+        cerebro.addanalyzer(bt.analyzers.SharpeRatio_A, _name="sharpe")
+        cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
+        cerebro.addanalyzer(bt.analyzers.SQN, _name="sqn")
+        cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
 
         start_val = cerebro.broker.getvalue()
         print(f"[{strat_name}] Starting Value: {start_val:.2f}")
-        cerebro.run()
+        results = cerebro.run()
         end_val = cerebro.broker.getvalue()
         print(f"[{strat_name}] Final Value:    {end_val:.2f}")
+
+        # Analyzer summaries
+        try:
+            s = results[0].analyzers.sharpe.get_analysis()  # type: ignore[attr-defined]
+            dd = results[0].analyzers.drawdown.get_analysis()  # type: ignore[attr-defined]
+            sq = results[0].analyzers.sqn.get_analysis()  # type: ignore[attr-defined]
+            ta = results[0].analyzers.trades.get_analysis()  # type: ignore[attr-defined]
+
+            print(f"[{strat_name}] Sharpe: {_fmt(s.get('sharperatio'))}")
+            maxdd = (dd.get('max') or {}).get('drawdown') if isinstance(dd, dict) else None
+            print(f"[{strat_name}] MaxDD:  {_fmt(maxdd)}%")
+            print(f"[{strat_name}] SQN:    {_fmt(sq.get('sqn'))}")
+
+            total_closed = ((ta.get('total') or {}).get('closed') if isinstance(ta, dict) else None) or 0
+            won_total = ((ta.get('won') or {}).get('total') if isinstance(ta, dict) else None) or 0
+            lost_total = ((ta.get('lost') or {}).get('total') if isinstance(ta, dict) else None) or 0
+            pnl_net_total = (((ta.get('pnl') or {}).get('net') or {}).get('total') if isinstance(ta, dict) else None)
+            print(f"[{strat_name}] Trades: closed={total_closed} won={won_total} lost={lost_total} pnl_net={_fmt(pnl_net_total)}")
+        except Exception as exc:
+            print(f"[{strat_name}] Analyzer summary unavailable: {exc}")
 
         if do_plot:
             try:
