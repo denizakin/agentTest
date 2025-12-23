@@ -61,8 +61,8 @@ def _tf_to_view(inst: str, tf: str) -> Optional[str]:
     return f"mv_candlesticks_{base}_{tf_norm}"
 
 
-def _fetch_df(db: DbConn, inst: str, tf: str, since: Optional[datetime], until: Optional[datetime]) -> pd.DataFrame:
-    view = _tf_to_view(inst, tf)
+def _fetch_df(db: DbConn, inst: str, tf: str, since: Optional[datetime], until: Optional[datetime], view: Optional[str] = None) -> pd.DataFrame:
+    view = view or _tf_to_view(inst, tf)
     if view is None:
         sql = (
             "SELECT ts, open, high, low, close, volume "
@@ -250,7 +250,7 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
         with db.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             conn.execute(text(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {view}"))
 
-    df = _fetch_df(db, inst, tf, since_dt, until_dt)
+    df = _fetch_df(db, inst, tf, since_dt, until_dt, view=view)
     if df.empty:
         print("No data returned for the given parameters.")
         return 1
@@ -563,7 +563,7 @@ def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str],
             except Exception:
                 pass
 
-    df = _fetch_df(db, inst, tf, since_dt, until_dt)
+    df = _fetch_df(db, inst, tf, since_dt, until_dt, view=view)
     if df.empty:
         print("No data returned for the given parameters.")
         return 1
@@ -725,7 +725,7 @@ def run_wfo(inst: str, tf: str, since: Optional[str], until: Optional[str], cash
             except Exception:
                 pass
 
-    df = _fetch_df(db, inst, tf, since_dt, until_dt)
+    df = _fetch_df(db, inst, tf, since_dt, until_dt, view=view)
     if df.empty:
         print("No data returned for the given parameters.")
         return 1
