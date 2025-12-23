@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 from typing import Optional, Tuple, Dict, Any, List
+from pathlib import Path
 
 import pandas as pd
 import backtrader as bt
@@ -15,6 +16,7 @@ from sqlalchemy import text
 
 from config import load_env_file
 from db.db_conn import DbConn
+from db.run_logger import RunLogger
 from backtest.strategies.registry import get_strategy, available_strategies
 
 
@@ -124,7 +126,7 @@ def _fmt(x, nd: int = 2) -> str:
 def run_once(df_in: pd.DataFrame, strat_name: str, params: Dict[str, Any], *,
              cash: float, commission: float, coc: bool, use_sizer: bool, stake: int,
              slip_perc: float = 0.0, slip_fixed: float = 0.0, slip_open: bool = True,
-             do_plot: bool = False, verbose: bool = True) -> Tuple[float, Dict[str, Any]]:
+             do_plot: bool = False, verbose: bool = True) -> Tuple[float, Dict[str, Any], object]:
     cerebro = bt.Cerebro()
     datafeed = bt.feeds.PandasData(
         dataname=df_in,
@@ -225,12 +227,14 @@ def run_once(df_in: pd.DataFrame, strat_name: str, params: Dict[str, Any], *,
             print(f"[{strat_name}] Analyzer summary unavailable: {exc}")
         metrics = {}
 
+    figs = None
     if do_plot:
         try:
-            cerebro.plot(style="candlestick")
+            figs = cerebro.plot(style="candlestick")
         except Exception as exc:
             print(f"Plotting failed: {exc}")
-    return float(end_val), metrics
+    metrics["final"] = float(end_val)
+    return float(end_val), metrics, figs
 
 
 def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str], cash: float, commission: float,
@@ -240,6 +244,7 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
                  slip_perc: float = 0.0, slip_fixed: float = 0.0, slip_open: bool = True) -> int:
     load_env_file()
     db = DbConn()
+    logger = RunLogger(Path("resources/plots"))
 
     since_dt = _parse_time(since)
     until_dt = _parse_time(until)
@@ -257,73 +262,103 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
     else:
         print(f"Loaded {len(df)} bars from {df['ts'].iloc[0]} to {df['ts'].iloc[-1]}")
 
-    data = bt.feeds.PandasData(
-        dataname=df,
-        datetime="ts",
-        open="open",
-        high="high",
-        low="low",
-        close="close",
-        volume="volume",
-        openinterest=None,
-    )
-
     end_main: float
     end_bh: float = 0.0
+    metrics_main: Dict[str, Any] = {}
+    metrics_bh: Dict[str, Any] = {}
+    plot_main: Optional[str] = None
+    figs_main = None
+
+    with db.session_scope() as s:
+        run_id = logger.start_run(
+            session=s,
+            run_type="backtest",
+            instrument_id=inst,
+            timeframe=tf,
+            strategy=strategy_name,
+            params=strat_params,
+            cash=cash,
+            commission=commission,
+            slip_perc=slip_perc,
+            slip_fixed=slip_fixed,
+            slip_open=slip_open,
+            baseline=baseline,
+        )
     # Baseline in parallel: start baseline first, then run main, then await baseline
-    if baseline and parallel_baseline:
-        try:
-            from concurrent.futures import ProcessPoolExecutor
-            with ProcessPoolExecutor(max_workers=2) as ex:
-                fut = ex.submit(
-                    run_once, df, "buyhold", {},
-                    cash=cash, commission=commission, coc=coc,
-                    use_sizer=use_sizer, stake=stake,
-                    slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
-                    do_plot=False,
-                )
-                # Run main while baseline executes in parallel
-                end_main, _ = run_once(
+        if baseline and parallel_baseline:
+            try:
+                from concurrent.futures import ProcessPoolExecutor
+                with ProcessPoolExecutor(max_workers=2) as ex:
+                    fut = ex.submit(
+                        run_once, df, "buyhold", {},
+                        cash=cash, commission=commission, coc=coc,
+                        use_sizer=use_sizer, stake=stake,
+                        slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+                        do_plot=False, verbose=False,
+                    )
+                    end_main, metrics_main, figs_main = run_once(
+                        df, strategy_name, strat_params,
+                        cash=cash, commission=commission, coc=coc,
+                        use_sizer=use_sizer, stake=stake,
+                        slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+                        do_plot=bool(plot), verbose=True,
+                    )
+                    end_bh, metrics_bh, _ = fut.result()
+            except Exception as exc:
+                print(f"Parallel baseline failed: {exc}; falling back to sequential.")
+                end_main, metrics_main, figs_main = run_once(
                     df, strategy_name, strat_params,
                     cash=cash, commission=commission, coc=coc,
                     use_sizer=use_sizer, stake=stake,
                     slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
                     do_plot=bool(plot)
                 )
-                end_bh = float(fut.result())
-        except Exception as exc:
-            print(f"Parallel baseline failed: {exc}; falling back to sequential.")
-            end_main, _ = run_once(
+                end_bh, metrics_bh, _ = run_once(
+                    df, "buyhold", {},
+                    cash=cash, commission=commission, coc=coc,
+                    use_sizer=use_sizer, stake=stake,
+                    slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+                    do_plot=False, verbose=False,
+                )
+        else:
+            # Sequential path or no baseline requested
+            end_main, metrics_main, figs_main = run_once(
                 df, strategy_name, strat_params,
                 cash=cash, commission=commission, coc=coc,
                 use_sizer=use_sizer, stake=stake,
                 slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
                 do_plot=bool(plot)
             )
-            end_bh, _ = run_once(
-                df, "buyhold", {},
-                cash=cash, commission=commission, coc=coc,
-                use_sizer=use_sizer, stake=stake,
-                slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
-                do_plot=False,
-            )
-    else:
-        # Sequential path or no baseline requested
-        end_main, _ = run_once(
-            df, strategy_name, strat_params,
-            cash=cash, commission=commission, coc=coc,
-            use_sizer=use_sizer, stake=stake,
-            slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
-            do_plot=bool(plot)
+            if baseline:
+                end_bh, metrics_bh, _ = run_once(
+                    df, "buyhold", {},
+                    cash=cash, commission=commission, coc=coc,
+                    use_sizer=use_sizer, stake=stake,
+                    slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+                    do_plot=False, verbose=False,
+                )
+
+        if plot:
+            plot_main = logger.save_plot(figs_main, run_id, "main")
+
+        logger.log_result(
+            session=s,
+            run_id=run_id,
+            label="main",
+            params=strat_params,
+            metrics=metrics_main,
+            plot_path=plot_main,
         )
         if baseline:
-            end_bh, _ = run_once(
-                df, "buyhold", {},
-                cash=cash, commission=commission, coc=coc,
-                use_sizer=use_sizer, stake=stake,
-                slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
-                do_plot=False,
+            logger.log_result(
+                session=s,
+                run_id=run_id,
+                label="baseline",
+                params={},
+                metrics=metrics_bh,
+                plot_path=None,
             )
+        logger.complete_run(s, run_id)
 
     if baseline:
         diff = end_main - end_bh
@@ -617,59 +652,85 @@ def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str],
             flat.append(res)
 
     rows: List[Dict[str, Any]] = []
-    for strat in flat:
-        # Extract params for this run
-        p = getattr(strat, 'params', None)
-        p_dict = {}
-        if p is not None:
-            for k in dir(p):
-                if k.startswith('_'):
-                    continue
-                try:
-                    val = getattr(p, k)
-                except Exception:
-                    continue
-                if isinstance(val, (int, float, bool)):
-                    p_dict[k] = val
+    with db.session_scope() as s:
+        run_id = logger.start_run(
+            session=s,
+            run_type="optimize",
+            instrument_id=inst,
+            timeframe=tf,
+            strategy=strategy_name,
+            params={"grid": grid},
+            cash=cash,
+            commission=commission,
+            slip_perc=slip_perc,
+            slip_fixed=slip_fixed,
+            slip_open=slip_open,
+            baseline=False,
+        )
 
-        if not _constraint_ok(p_dict, constraint):
-            continue
+        for strat in flat:
+            # Extract params for this run
+            p = getattr(strat, 'params', None)
+            p_dict = {}
+            if p is not None:
+                for k in dir(p):
+                    if k.startswith('_'):
+                        continue
+                    try:
+                        val = getattr(p, k)
+                    except Exception:
+                        continue
+                    if isinstance(val, (int, float, bool)):
+                        p_dict[k] = val
 
-        # Metrics via analyzers
-        try:
-            s = strat.analyzers.sharpe.get_analysis()
-            dd = strat.analyzers.drawdown.get_analysis()
-            sq = strat.analyzers.sqn.get_analysis()
-            ta = strat.analyzers.trades.get_analysis()
-        except Exception:
-            continue
+            if not _constraint_ok(p_dict, constraint):
+                continue
 
-        maxdd = (dd.get('max') or {}).get('drawdown') if isinstance(dd, dict) else None
-        total_closed = ((ta.get('total') or {}).get('closed') if isinstance(ta, dict) else None)
-        if total_closed is None:
-            total_closed = ((ta.get('strike') or {}).get('total') if isinstance(ta, dict) else 0) or 0
-        won_total = ((ta.get('won') or {}).get('total') if isinstance(ta, dict) else None)
-        if won_total is None:
-            won_total = ((ta.get('strike') or {}).get('won') if isinstance(ta, dict) else 0) or 0
-        gross_won = (((ta.get('won') or {}).get('pnl') or {}).get('total') if isinstance(ta, dict) else None)
-        gross_lost_signed = (((ta.get('lost') or {}).get('pnl') or {}).get('total') if isinstance(ta, dict) else None)
-        gross_lost = abs(float(gross_lost_signed)) if gross_lost_signed not in (None, 0) else 0.0
-        profit_factor = (float(gross_won) / gross_lost) if gross_won is not None and gross_lost > 0 else None
-        win_rate = (won_total / total_closed * 100.0) if total_closed else None
+            # Metrics via analyzers
+            try:
+                s_an = strat.analyzers.sharpe.get_analysis()
+                dd = strat.analyzers.drawdown.get_analysis()
+                ta = strat.analyzers.trades.get_analysis()
+            except Exception:
+                continue
 
-        try:
-            final_value = float(strat.broker.getvalue())
-        except Exception:
-            final_value = float('nan')
+            maxdd = (dd.get('max') or {}).get('drawdown') if isinstance(dd, dict) else None
+            total_closed = ((ta.get('total') or {}).get('closed') if isinstance(ta, dict) else None)
+            if total_closed is None:
+                total_closed = ((ta.get('strike') or {}).get('total') if isinstance(ta, dict) else 0) or 0
+            won_total = ((ta.get('won') or {}).get('total') if isinstance(ta, dict) else None)
+            if won_total is None:
+                won_total = ((ta.get('strike') or {}).get('won') if isinstance(ta, dict) else 0) or 0
+            gross_won = (((ta.get('won') or {}).get('pnl') or {}).get('total') if isinstance(ta, dict) else None)
+            gross_lost_signed = (((ta.get('lost') or {}).get('pnl') or {}).get('total') if isinstance(ta, dict) else None)
+            gross_lost = abs(float(gross_lost_signed)) if gross_lost_signed not in (None, 0) else 0.0
+            profit_factor = (float(gross_won) / gross_lost) if gross_won is not None and gross_lost > 0 else None
+            win_rate = (won_total / total_closed * 100.0) if total_closed else None
 
-        rows.append({
-            'params': p_dict,
-            'final': final_value,
-            'sharpe': s.get('sharperatio') if isinstance(s, dict) else None,
-            'maxdd': maxdd,
-            'winrate': win_rate,
-            'pf': profit_factor,
-        })
+            try:
+                final_value = float(strat.broker.getvalue())
+            except Exception:
+                final_value = float('nan')
+
+            row = {
+                'params': p_dict,
+                'final': final_value,
+                'sharpe': s_an.get('sharperatio') if isinstance(s_an, dict) else None,
+                'maxdd': maxdd,
+                'winrate': win_rate,
+                'pf': profit_factor,
+            }
+            rows.append(row)
+            logger.log_result(
+                session=s,
+                run_id=run_id,
+                label="opt_variant",
+                params=p_dict,
+                metrics=row,
+                plot_path=None,
+            )
+
+        logger.complete_run(s, run_id)
 
     if not rows:
         print("No optimization results collected (possibly due to constraint or failures).")
@@ -713,6 +774,7 @@ def run_wfo(inst: str, tf: str, since: Optional[str], until: Optional[str], cash
             slip_perc: float = 0.0, slip_fixed: float = 0.0, slip_open: bool = True) -> int:
     load_env_file()
     db = DbConn()
+    logger = RunLogger(Path("resources/plots"))
 
     since_dt = _parse_time(since)
     until_dt = _parse_time(until)
@@ -741,128 +803,167 @@ def run_wfo(inst: str, tf: str, since: Optional[str], until: Optional[str], cash
     end_ts = df["ts"].max()
     folds: List[Dict[str, Any]] = []
 
-    train_start = start_ts
-    while True:
-        train_end = _month_delta(train_start, train_months)
-        test_end = _month_delta(train_end, test_months)
-        if train_end >= end_ts or train_start >= end_ts:
-            break
-        test_start = train_end
-        if test_start >= end_ts:
-            break
-        test_end = min(test_end, end_ts)
-
-        train_df = _slice_df_by_range(df, train_start, train_end)
-        test_df = _slice_df_by_range(df, test_start, test_end)
-        if train_df.empty or test_df.empty:
-            train_start = _month_delta(train_start, step_months)
-            continue
-
-        # Optimize on train (reuse run_optimize approach but without printing top table)
-        cerebro = bt.Cerebro()
-        datafeed = bt.feeds.PandasData(
-            dataname=train_df,
-            datetime="ts",
-            open="open",
-            high="high",
-            low="low",
-            close="close",
-            volume="volume",
-            openinterest=None,
+    with db.session_scope() as s:
+        run_id = logger.start_run(
+            session=s,
+            run_type="wfo",
+            instrument_id=inst,
+            timeframe=tf,
+            strategy=strategy_name,
+            params={"grid": grid, "objective": objective},
+            cash=cash,
+            commission=commission,
+            slip_perc=slip_perc,
+            slip_fixed=slip_fixed,
+            slip_open=slip_open,
+            baseline=False,
         )
-        cerebro.adddata(datafeed)
-        cerebro.broker.setcash(float(cash))
-        cerebro.broker.setcommission(commission=float(commission))
-        if float(slip_perc) > 0.0:
-            cerebro.broker.set_slippage_perc(perc=float(slip_perc), slip_open=bool(slip_open))
-        elif float(slip_fixed) > 0.0:
-            cerebro.broker.set_slippage_fixed(fixed=float(slip_fixed), slip_open=bool(slip_open))
 
-        StrategyCls = get_strategy(strategy_name)
-        cerebro.addanalyzer(bt.analyzers.SharpeRatio_A, _name="sharpe")
-        cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
-        cerebro.addanalyzer(bt.analyzers.SQN, _name="sqn")
-        cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
-        cerebro.optreturn = False
-        cerebro.optstrategy(StrategyCls, **grid)
-        results = cerebro.run(maxcpus=int(maxcpus))
+        train_start = start_ts
+        fold_idx = 0
+        while True:
+            train_end = _month_delta(train_start, train_months)
+            test_end = _month_delta(train_end, test_months)
+            if train_end >= end_ts or train_start >= end_ts:
+                break
+            test_start = train_end
+            if test_start >= end_ts:
+                break
+            test_end = min(test_end, end_ts)
 
-        flat: List[bt.Strategy] = []
-        for res in results:
-            if isinstance(res, (list, tuple)) and res:
-                flat.append(res[0])
-            elif isinstance(res, bt.Strategy):
-                flat.append(res)
-
-        train_rows: List[Dict[str, Any]] = []
-        for strat in flat:
-            p_dict = {}
-            p = getattr(strat, "params", None)
-            if p is not None:
-                for k in dir(p):
-                    if k.startswith("_"):
-                        continue
-                    try:
-                        val = getattr(p, k)
-                    except Exception:
-                        continue
-                    if isinstance(val, (int, float, bool)):
-                        p_dict[k] = val
-            if not _constraint_ok(p_dict, constraint):
+            train_df = _slice_df_by_range(df, train_start, train_end)
+            test_df = _slice_df_by_range(df, test_start, test_end)
+            if train_df.empty or test_df.empty:
+                train_start = _month_delta(train_start, step_months)
                 continue
-            try:
-                s = strat.analyzers.sharpe.get_analysis()
-                dd = strat.analyzers.drawdown.get_analysis()
-                ta = strat.analyzers.trades.get_analysis()
-            except Exception:
+
+            # Optimize on train
+            cerebro = bt.Cerebro()
+            datafeed = bt.feeds.PandasData(
+                dataname=train_df,
+                datetime="ts",
+                open="open",
+                high="high",
+                low="low",
+                close="close",
+                volume="volume",
+                openinterest=None,
+            )
+            cerebro.adddata(datafeed)
+            cerebro.broker.setcash(float(cash))
+            cerebro.broker.setcommission(commission=float(commission))
+            if float(slip_perc) > 0.0:
+                cerebro.broker.set_slippage_perc(perc=float(slip_perc), slip_open=bool(slip_open))
+            elif float(slip_fixed) > 0.0:
+                cerebro.broker.set_slippage_fixed(fixed=float(slip_fixed), slip_open=bool(slip_open))
+
+            StrategyCls = get_strategy(strategy_name)
+            cerebro.addanalyzer(bt.analyzers.SharpeRatio_A, _name="sharpe")
+            cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
+            cerebro.addanalyzer(bt.analyzers.SQN, _name="sqn")
+            cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
+            cerebro.optreturn = False
+            cerebro.optstrategy(StrategyCls, **grid)
+            results = cerebro.run(maxcpus=int(maxcpus))
+
+            flat: List[bt.Strategy] = []
+            for res in results:
+                if isinstance(res, (list, tuple)) and res:
+                    flat.append(res[0])
+                elif isinstance(res, bt.Strategy):
+                    flat.append(res)
+
+            train_rows: List[Dict[str, Any]] = []
+            for strat in flat:
+                p_dict = {}
+                p = getattr(strat, "params", None)
+                if p is not None:
+                    for k in dir(p):
+                        if k.startswith("_"):
+                            continue
+                        try:
+                            val = getattr(p, k)
+                        except Exception:
+                            continue
+                        if isinstance(val, (int, float, bool)):
+                            p_dict[k] = val
+                if not _constraint_ok(p_dict, constraint):
+                    continue
+                try:
+                    s_an = strat.analyzers.sharpe.get_analysis()
+                    dd = strat.analyzers.drawdown.get_analysis()
+                    ta = strat.analyzers.trades.get_analysis()
+                except Exception:
+                    continue
+                maxdd = (dd.get("max") or {}).get("drawdown") if isinstance(dd, dict) else None
+                total_closed = ((ta.get("total") or {}).get("closed") if isinstance(ta, dict) else None)
+                if total_closed is None:
+                    total_closed = ((ta.get("strike") or {}).get("total") if isinstance(ta, dict) else 0) or 0
+                won_total = ((ta.get("won") or {}).get("total") if isinstance(ta, dict) else None)
+                if won_total is None:
+                    won_total = ((ta.get("strike") or {}).get("won") if isinstance(ta, dict) else 0) or 0
+                gross_won = (((ta.get("won") or {}).get("pnl") or {}).get("total") if isinstance(ta, dict) else None)
+                gross_lost_signed = (((ta.get("lost") or {}).get("pnl") or {}).get("total") if isinstance(ta, dict) else None)
+                gross_lost = abs(float(gross_lost_signed)) if gross_lost_signed not in (None, 0) else 0.0
+                profit_factor = (float(gross_won) / gross_lost) if gross_won is not None and gross_lost > 0 else None
+                win_rate = (won_total / total_closed * 100.0) if total_closed else None
+                train_rows.append({
+                    "params": p_dict,
+                    "final": float(strat.broker.getvalue()) if hasattr(strat, "broker") else None,
+                    "sharpe": s_an.get("sharperatio") if isinstance(s_an, dict) else None,
+                    "maxdd": maxdd,
+                    "winrate": win_rate,
+                    "pf": profit_factor,
+                })
+
+            best = _pick_best_by_objective(train_rows, objective)
+            if not best:
+                train_start = _month_delta(train_start, step_months)
                 continue
-            maxdd = (dd.get("max") or {}).get("drawdown") if isinstance(dd, dict) else None
-            total_closed = ((ta.get("total") or {}).get("closed") if isinstance(ta, dict) else None)
-            if total_closed is None:
-                total_closed = ((ta.get("strike") or {}).get("total") if isinstance(ta, dict) else 0) or 0
-            won_total = ((ta.get("won") or {}).get("total") if isinstance(ta, dict) else None)
-            if won_total is None:
-                won_total = ((ta.get("strike") or {}).get("won") if isinstance(ta, dict) else 0) or 0
-            gross_won = (((ta.get("won") or {}).get("pnl") or {}).get("total") if isinstance(ta, dict) else None)
-            gross_lost_signed = (((ta.get("lost") or {}).get("pnl") or {}).get("total") if isinstance(ta, dict) else None)
-            gross_lost = abs(float(gross_lost_signed)) if gross_lost_signed not in (None, 0) else 0.0
-            profit_factor = (float(gross_won) / gross_lost) if gross_won is not None and gross_lost > 0 else None
-            win_rate = (won_total / total_closed * 100.0) if total_closed else None
-            train_rows.append({
-                "params": p_dict,
-                "final": float(strat.broker.getvalue()) if hasattr(strat, "broker") else None,
-                "sharpe": s.get("sharperatio") if isinstance(s, dict) else None,
-                "maxdd": maxdd,
-                "winrate": win_rate,
-                "pf": profit_factor,
+
+            # Run best params on test set (single run, no plotting)
+            test_end_val, test_metrics, _ = run_once(
+                test_df, strategy_name, best["params"],
+                cash=cash, commission=commission, coc=True,  # keep coc default true for consistency
+                use_sizer=False, stake=1,
+                slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+                do_plot=False, verbose=False,
+            )
+
+            fold_idx += 1
+            folds.append({
+                "train_start": train_start,
+                "train_end": train_end,
+                "test_start": test_start,
+                "test_end": test_end,
+                "params": best["params"],
+                "train_obj": best.get(objective),
+                "test_final": test_end_val,
+                "test_metrics": test_metrics,
             })
 
-        best = _pick_best_by_objective(train_rows, objective)
-        if not best:
+            logger.log_result(
+                session=s,
+                run_id=run_id,
+                label=f"wfo_fold_{fold_idx}",
+                params=best["params"],
+                metrics=test_metrics,
+                plot_path=None,
+            )
+            logger.log_wfo_fold(
+                session=s,
+                run_id=run_id,
+                fold_index=fold_idx,
+                train_range=(train_start, train_end),
+                test_range=(test_start, test_end),
+                params=best["params"],
+                train_objective=best.get(objective),
+                metrics=test_metrics,
+            )
+
             train_start = _month_delta(train_start, step_months)
-            continue
 
-        # Run best params on test set (single run, no plotting)
-        test_end_val, test_metrics = run_once(
-            test_df, strategy_name, best["params"],
-            cash=cash, commission=commission, coc=True,  # keep coc default true for consistency
-            use_sizer=False, stake=1,
-            slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
-            do_plot=False, verbose=False,
-        )
-
-        folds.append({
-            "train_start": train_start,
-            "train_end": train_end,
-            "test_start": test_start,
-            "test_end": test_end,
-            "params": best["params"],
-            "train_obj": best.get(objective),
-            "test_final": test_end_val,
-            "test_metrics": test_metrics,
-        })
-
-        train_start = _month_delta(train_start, step_months)
+        logger.complete_run(s, run_id)
 
     if not folds:
         print("No WFO folds produced (check date ranges and window sizes).")
