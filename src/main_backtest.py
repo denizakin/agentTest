@@ -124,7 +124,7 @@ def _fmt(x, nd: int = 2) -> str:
 def run_once(df_in: pd.DataFrame, strat_name: str, params: Dict[str, Any], *,
              cash: float, commission: float, coc: bool, use_sizer: bool, stake: int,
              slip_perc: float = 0.0, slip_fixed: float = 0.0, slip_open: bool = True,
-             do_plot: bool = False) -> float:
+             do_plot: bool = False, verbose: bool = True) -> Tuple[float, Dict[str, Any]]:
     cerebro = bt.Cerebro()
     datafeed = bt.feeds.PandasData(
         dataname=df_in,
@@ -164,10 +164,12 @@ def run_once(df_in: pd.DataFrame, strat_name: str, params: Dict[str, Any], *,
     cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
 
     start_val = cerebro.broker.getvalue()
-    print(f"[{strat_name}] Starting Value: {start_val:.2f}")
+    if verbose:
+        print(f"[{strat_name}] Starting Value: {start_val:.2f}")
     results = cerebro.run()
     end_val = cerebro.broker.getvalue()
-    print(f"[{strat_name}] Final Value:    {end_val:.2f}")
+    if verbose:
+        print(f"[{strat_name}] Final Value:    {end_val:.2f}")
 
     # Analyzer summaries
     try:
@@ -176,10 +178,7 @@ def run_once(df_in: pd.DataFrame, strat_name: str, params: Dict[str, Any], *,
         sq = results[0].analyzers.sqn.get_analysis()  # type: ignore[attr-defined]
         ta = results[0].analyzers.trades.get_analysis()  # type: ignore[attr-defined]
 
-        print(f"[{strat_name}] Sharpe: {_fmt(s.get('sharperatio'))}")
         maxdd = (dd.get('max') or {}).get('drawdown') if isinstance(dd, dict) else None
-        print(f"[{strat_name}] MaxDD:  {_fmt(maxdd)}%")
-        print(f"[{strat_name}] SQN:    {_fmt(sq.get('sqn'))}")
 
         # Extract trade counts
         total_closed = ((ta.get('total') or {}).get('closed') if isinstance(ta, dict) else None)
@@ -203,17 +202,35 @@ def run_once(df_in: pd.DataFrame, strat_name: str, params: Dict[str, Any], *,
 
         pnl_net_total = (((ta.get('pnl') or {}).get('net') or {}).get('total') if isinstance(ta, dict) else None)
 
-        print(f"[{strat_name}] Trades: closed={int(total_closed)} won={int(won_total)} lost={int(lost_total)} pnl_net={_fmt(pnl_net_total)}")
-        print(f"[{strat_name}] WinRate: {_fmt(win_rate)}%  ProfitFactor: {_fmt(profit_factor, nd=3)}")
+        if verbose:
+            print(f"[{strat_name}] Sharpe: {_fmt(s.get('sharperatio'))}")
+            print(f"[{strat_name}] MaxDD:  {_fmt(maxdd)}%")
+            print(f"[{strat_name}] SQN:    {_fmt(sq.get('sqn'))}")
+            print(f"[{strat_name}] Trades: closed={int(total_closed)} won={int(won_total)} lost={int(lost_total)} pnl_net={_fmt(pnl_net_total)}")
+            print(f"[{strat_name}] WinRate: {_fmt(win_rate)}%  ProfitFactor: {_fmt(profit_factor, nd=3)}")
+
+        metrics = {
+            "sharpe": s.get('sharperatio') if isinstance(s, dict) else None,
+            "maxdd": maxdd,
+            "sqn": sq.get('sqn') if isinstance(sq, dict) else None,
+            "closed": total_closed,
+            "won": won_total,
+            "lost": lost_total,
+            "pnl_net": pnl_net_total,
+            "winrate": win_rate,
+            "pf": profit_factor,
+        }
     except Exception as exc:
-        print(f"[{strat_name}] Analyzer summary unavailable: {exc}")
+        if verbose:
+            print(f"[{strat_name}] Analyzer summary unavailable: {exc}")
+        metrics = {}
 
     if do_plot:
         try:
             cerebro.plot(style="candlestick")
         except Exception as exc:
             print(f"Plotting failed: {exc}")
-    return float(end_val)
+    return float(end_val), metrics
 
 
 def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str], cash: float, commission: float,
@@ -266,7 +283,7 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
                     do_plot=False,
                 )
                 # Run main while baseline executes in parallel
-                end_main = run_once(
+                end_main, _ = run_once(
                     df, strategy_name, strat_params,
                     cash=cash, commission=commission, coc=coc,
                     use_sizer=use_sizer, stake=stake,
@@ -276,14 +293,14 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
                 end_bh = float(fut.result())
         except Exception as exc:
             print(f"Parallel baseline failed: {exc}; falling back to sequential.")
-            end_main = run_once(
+            end_main, _ = run_once(
                 df, strategy_name, strat_params,
                 cash=cash, commission=commission, coc=coc,
                 use_sizer=use_sizer, stake=stake,
                 slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
                 do_plot=bool(plot)
             )
-            end_bh = run_once(
+            end_bh, _ = run_once(
                 df, "buyhold", {},
                 cash=cash, commission=commission, coc=coc,
                 use_sizer=use_sizer, stake=stake,
@@ -292,7 +309,7 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
             )
     else:
         # Sequential path or no baseline requested
-        end_main = run_once(
+        end_main, _ = run_once(
             df, strategy_name, strat_params,
             cash=cash, commission=commission, coc=coc,
             use_sizer=use_sizer, stake=stake,
@@ -300,7 +317,7 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
             do_plot=bool(plot)
         )
         if baseline:
-            end_bh = run_once(
+            end_bh, _ = run_once(
                 df, "buyhold", {},
                 cash=cash, commission=commission, coc=coc,
                 use_sizer=use_sizer, stake=stake,
@@ -379,6 +396,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument("--list-strategies", action="store_true", help="List available strategy names and exit")
+    # Walk-forward optimization (WFO)
+    p.add_argument("--wfo", action="store_true", help="Enable walk-forward optimization (train/test rolling windows)")
+    p.add_argument("--wfo-train-months", type=int, default=12, help="Train window size in months")
+    p.add_argument("--wfo-test-months", type=int, default=3, help="Test window size in months")
+    p.add_argument("--wfo-step-months", type=int, default=3, help="Step size to advance windows in months")
+    p.add_argument("--wfo-grid", default="", help="Param grid like fast=5:30:1,slow=10:60:5 (same format as --opt-grid)")
+    p.add_argument("--wfo-constraint", default="", help="Constraint expression on params, e.g., fast<slow")
+    p.add_argument("--wfo-objective", default="final", choices=["final", "sharpe", "pf"], help="Metric to pick best train run")
+    p.add_argument("--wfo-maxcpus", type=int, default=0, help="Max CPUs per train optimization (0=all)")
+    p.add_argument("--wfo-top", type=int, default=5, help="Show top N folds by test result")
     # Optimization (built-in Backtrader optstrategy)
     p.add_argument("--optimize", action="store_true", help="Enable Backtrader optimization for the selected strategy")
     p.add_argument(
@@ -406,6 +433,26 @@ def main() -> int:
         print(available_strategies())
         return 0
     strat_params = _parse_kv_pairs(args.sp)
+    if args.wfo:
+        return run_wfo(
+            inst=str(args.inst),
+            tf=str(args.tf),
+            since=args.since,
+            until=args.until,
+            cash=float(args.cash),
+            commission=float(args.commission),
+            strategy_name=str(args.strategy),
+            grid_spec=str(args.wfo_grid or args.opt_grid),
+            train_months=int(args.wfo_train_months),
+            test_months=int(args.wfo_test_months),
+            step_months=int(args.wfo_step_months),
+            constraint=str(args.wfo_constraint),
+            objective=str(args.wfo_objective),
+            maxcpus=int(args.wfo_maxcpus),
+            slip_perc=float(args.slip_perc),
+            slip_fixed=float(args.slip_fixed),
+            slip_open=not bool(args.no_slip_open),
+        )
     if args.optimize:
         return run_optimize(
             inst=str(args.inst),
@@ -483,6 +530,19 @@ def _constraint_ok(params: Dict[str, Any], expr: str) -> bool:
         return bool(eval(expr, {"__builtins__": {}}, params))
     except Exception:
         return True
+
+
+def _pick_best_by_objective(rows: List[Dict[str, Any]], objective: str) -> Optional[Dict[str, Any]]:
+    if not rows:
+        return None
+    key = objective.lower()
+    def score(row: Dict[str, Any]) -> float:
+        val = row.get(key)
+        try:
+            return float(val)
+        except Exception:
+            return float("-inf")
+    return max(rows, key=score)
 
 
 def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str], cash: float, commission: float,
@@ -616,12 +676,221 @@ def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str],
         return 3
 
     rows.sort(key=lambda r: (r['final'] if r['final'] is not None else float('-inf')), reverse=True)
-    topn = max(1, int(min(len(rows),  int(args.opt_top) if 'args' in globals() else 10)))
+    topn = 10
+    try:
+        from argparse import Namespace
+        if isinstance(globals().get("args"), Namespace):  # type: ignore
+            topn = int(getattr(globals()["args"], "opt_top", 10))  # type: ignore
+    except Exception:
+        pass
+    topn = max(1, int(min(len(rows), topn)))
     print(f"\nTop {topn} results by Final Value:")
     for i, r in enumerate(rows[:topn], 1):
         print(
             f"#{i} final={_fmt(r['final'])} sharpe={_fmt(r['sharpe'])} maxdd={_fmt(r['maxdd'])}% "
             f"winrate={_fmt(r['winrate'])}% pf={_fmt(r['pf'], nd=3)} params={r['params']}"
+        )
+
+    return 0
+
+
+def _month_delta(dt: datetime, months: int) -> datetime:
+    # naive month delta for UTC dt
+    year = dt.year + (dt.month - 1 + months) // 12
+    month = (dt.month - 1 + months) % 12 + 1
+    day = min(dt.day, 28)  # safe fallback
+    return dt.replace(year=year, month=month, day=day)
+
+
+def _slice_df_by_range(df: pd.DataFrame, start: datetime, end: datetime) -> pd.DataFrame:
+    mask = (df["ts"] >= start) & (df["ts"] <= end)
+    return df.loc[mask].copy()
+
+
+def run_wfo(inst: str, tf: str, since: Optional[str], until: Optional[str], cash: float, commission: float,
+            strategy_name: str, grid_spec: str, train_months: int, test_months: int, step_months: int,
+            constraint: str, objective: str, maxcpus: int,
+            slip_perc: float = 0.0, slip_fixed: float = 0.0, slip_open: bool = True) -> int:
+    load_env_file()
+    db = DbConn()
+
+    since_dt = _parse_time(since)
+    until_dt = _parse_time(until)
+
+    view = _tf_to_view(inst, tf)
+    if view is not None:
+        with db.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            try:
+                conn.execute(text(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {view}"))
+            except Exception:
+                pass
+
+    df = _fetch_df(db, inst, tf, since_dt, until_dt)
+    if df.empty:
+        print("No data returned for the given parameters.")
+        return 1
+    else:
+        print(f"Loaded {len(df)} bars from {df['ts'].iloc[0]} to {df['ts'].iloc[-1]}")
+
+    grid = _parse_grid(grid_spec)
+    if not grid:
+        print("No WFO grid provided. Use --wfo-grid (or --opt-grid), e.g., fast=5:30:1,slow=10:60:5")
+        return 2
+
+    start_ts = df["ts"].min()
+    end_ts = df["ts"].max()
+    folds: List[Dict[str, Any]] = []
+
+    train_start = start_ts
+    while True:
+        train_end = _month_delta(train_start, train_months)
+        test_end = _month_delta(train_end, test_months)
+        if train_end >= end_ts or train_start >= end_ts:
+            break
+        test_start = train_end
+        if test_start >= end_ts:
+            break
+        test_end = min(test_end, end_ts)
+
+        train_df = _slice_df_by_range(df, train_start, train_end)
+        test_df = _slice_df_by_range(df, test_start, test_end)
+        if train_df.empty or test_df.empty:
+            train_start = _month_delta(train_start, step_months)
+            continue
+
+        # Optimize on train (reuse run_optimize approach but without printing top table)
+        cerebro = bt.Cerebro()
+        datafeed = bt.feeds.PandasData(
+            dataname=train_df,
+            datetime="ts",
+            open="open",
+            high="high",
+            low="low",
+            close="close",
+            volume="volume",
+            openinterest=None,
+        )
+        cerebro.adddata(datafeed)
+        cerebro.broker.setcash(float(cash))
+        cerebro.broker.setcommission(commission=float(commission))
+        if float(slip_perc) > 0.0:
+            cerebro.broker.set_slippage_perc(perc=float(slip_perc), slip_open=bool(slip_open))
+        elif float(slip_fixed) > 0.0:
+            cerebro.broker.set_slippage_fixed(fixed=float(slip_fixed), slip_open=bool(slip_open))
+
+        StrategyCls = get_strategy(strategy_name)
+        cerebro.addanalyzer(bt.analyzers.SharpeRatio_A, _name="sharpe")
+        cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
+        cerebro.addanalyzer(bt.analyzers.SQN, _name="sqn")
+        cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
+        cerebro.optreturn = False
+        cerebro.optstrategy(StrategyCls, **grid)
+        results = cerebro.run(maxcpus=int(maxcpus))
+
+        flat: List[bt.Strategy] = []
+        for res in results:
+            if isinstance(res, (list, tuple)) and res:
+                flat.append(res[0])
+            elif isinstance(res, bt.Strategy):
+                flat.append(res)
+
+        train_rows: List[Dict[str, Any]] = []
+        for strat in flat:
+            p_dict = {}
+            p = getattr(strat, "params", None)
+            if p is not None:
+                for k in dir(p):
+                    if k.startswith("_"):
+                        continue
+                    try:
+                        val = getattr(p, k)
+                    except Exception:
+                        continue
+                    if isinstance(val, (int, float, bool)):
+                        p_dict[k] = val
+            if not _constraint_ok(p_dict, constraint):
+                continue
+            try:
+                s = strat.analyzers.sharpe.get_analysis()
+                dd = strat.analyzers.drawdown.get_analysis()
+                ta = strat.analyzers.trades.get_analysis()
+            except Exception:
+                continue
+            maxdd = (dd.get("max") or {}).get("drawdown") if isinstance(dd, dict) else None
+            total_closed = ((ta.get("total") or {}).get("closed") if isinstance(ta, dict) else None)
+            if total_closed is None:
+                total_closed = ((ta.get("strike") or {}).get("total") if isinstance(ta, dict) else 0) or 0
+            won_total = ((ta.get("won") or {}).get("total") if isinstance(ta, dict) else None)
+            if won_total is None:
+                won_total = ((ta.get("strike") or {}).get("won") if isinstance(ta, dict) else 0) or 0
+            gross_won = (((ta.get("won") or {}).get("pnl") or {}).get("total") if isinstance(ta, dict) else None)
+            gross_lost_signed = (((ta.get("lost") or {}).get("pnl") or {}).get("total") if isinstance(ta, dict) else None)
+            gross_lost = abs(float(gross_lost_signed)) if gross_lost_signed not in (None, 0) else 0.0
+            profit_factor = (float(gross_won) / gross_lost) if gross_won is not None and gross_lost > 0 else None
+            win_rate = (won_total / total_closed * 100.0) if total_closed else None
+            train_rows.append({
+                "params": p_dict,
+                "final": float(strat.broker.getvalue()) if hasattr(strat, "broker") else None,
+                "sharpe": s.get("sharperatio") if isinstance(s, dict) else None,
+                "maxdd": maxdd,
+                "winrate": win_rate,
+                "pf": profit_factor,
+            })
+
+        best = _pick_best_by_objective(train_rows, objective)
+        if not best:
+            train_start = _month_delta(train_start, step_months)
+            continue
+
+        # Run best params on test set (single run, no plotting)
+        test_end_val, test_metrics = run_once(
+            test_df, strategy_name, best["params"],
+            cash=cash, commission=commission, coc=True,  # keep coc default true for consistency
+            use_sizer=False, stake=1,
+            slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+            do_plot=False, verbose=False,
+        )
+
+        folds.append({
+            "train_start": train_start,
+            "train_end": train_end,
+            "test_start": test_start,
+            "test_end": test_end,
+            "params": best["params"],
+            "train_obj": best.get(objective),
+            "test_final": test_end_val,
+            "test_metrics": test_metrics,
+        })
+
+        train_start = _month_delta(train_start, step_months)
+
+    if not folds:
+        print("No WFO folds produced (check date ranges and window sizes).")
+        return 3
+
+    print("\nWFO Fold Results (test periods):")
+    for i, f in enumerate(folds, 1):
+        m = f["test_metrics"]
+        print(
+            f"#{i} test={f['test_start'].date()}->{f['test_end'].date()} final={_fmt(f['test_final'])} "
+            f"sharpe={_fmt(m.get('sharpe'))} maxdd={_fmt(m.get('maxdd'))}% "
+            f"winrate={_fmt(m.get('winrate'))}% pf={_fmt(m.get('pf'), nd=3)} params={f['params']}"
+        )
+
+    # Aggregate OOS metrics
+    finals = [f["test_final"] for f in folds if f.get("test_final") is not None]
+    avg_final = sum(finals) / len(finals) if finals else float("nan")
+    print("\nWFO Summary (out-of-sample test):")
+    print(f"  Folds: {len(folds)}")
+    print(f"  Avg Final: {_fmt(avg_final)}")
+
+    # Show top test folds by final value
+    topn = min(len(folds), 5)
+    folds_sorted = sorted(folds, key=lambda f: f.get("test_final", float("-inf")), reverse=True)
+    print(f"  Top {topn} folds by test Final:")
+    for i, f in enumerate(folds_sorted[:topn], 1):
+        print(
+            f"    #{i} test={f['test_start'].date()}->{f['test_end'].date()} final={_fmt(f['test_final'])} params={f['params']}"
         )
 
     return 0
