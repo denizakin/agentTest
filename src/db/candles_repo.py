@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Iterable, List, Mapping
+from typing import Iterable, List, Mapping, Optional
 
-from sqlalchemy import text
+from sqlalchemy import select, text, desc
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -57,6 +57,17 @@ class CandlesRepo:
         # SQLAlchemy may return -1 for rowcount in some drivers; fall back to len(payload)
         return result.rowcount if result.rowcount and result.rowcount > 0 else len(payload)
 
+    def get_latest_ts(self, session: Session, instrument_id: str) -> Optional[datetime]:
+        """Return most recent candle timestamp for an instrument, or None if empty."""
+        stmt = (
+            select(Candlestick.ts)
+            .where(Candlestick.instrument_id == instrument_id)
+            .order_by(desc(Candlestick.ts))
+            .limit(1)
+        )
+        result = session.execute(stmt).scalar_one_or_none()
+        return result
+
 
 def parse_okx_candle_row(inst_id: str, row: list) -> CandleRow:
     """Parse OKX kline row into CandleRow.
@@ -74,4 +85,3 @@ def parse_okx_candle_row(inst_id: str, row: list) -> CandleRow:
         close=Decimal(str(row[4])),
         volume=Decimal(str(row[5])),
     )
-
