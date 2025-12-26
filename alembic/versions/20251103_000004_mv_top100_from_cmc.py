@@ -1,7 +1,7 @@
 """create materialized views for top CMC symbols (excluding stables)
 
 Revision ID: 6c7f9c1d2e3f
-Revises: 9542bb5
+Revises: b7c9d0e1f2a3
 Create Date: 2025-11-03 00:00:00
 """
 from __future__ import annotations
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = "6c7f9c1d2e3f"
-down_revision = "9542bb5"
+down_revision = "b7c9d0e1f2a3"
 branch_labels = None
 depends_on = None
 
@@ -54,7 +54,7 @@ def upgrade() -> None:
     stable = _stable_symbols()
 
     # Get latest snapshot_ts and top 100 symbols by market cap
-    latest_ts = conn.execute(sa.text("SELECT max(snapshot_ts) FROM market_caps")).scalar()
+    latest_ts = conn.execute(sa.text("SELECT max(snapshot_ts) FROM cmc_market_caps")).scalar()
     if latest_ts is None:
         print("No market_caps data found; skipping MV creation.")
         return
@@ -63,7 +63,7 @@ def upgrade() -> None:
         sa.text(
             """
             SELECT symbol
-            FROM market_caps
+            FROM cmc_market_caps
             WHERE snapshot_ts = :ts
             ORDER BY market_cap_usd DESC
             LIMIT 100
@@ -82,6 +82,7 @@ def upgrade() -> None:
         sym_low = sym_up.lower()
         inst_id = f"{sym_up}-USDT"
 
+        inst_lit = inst_id.replace("'", "''")  # simple escape for literal insertion
         for tf, bucket_expr in tf_buckets.items():
             view_name = f"mv_candlesticks_{sym_low}_{tf}"
             idx_name = f"ix_mv_candles_{sym_low}_{tf}_ts"
@@ -97,11 +98,11 @@ def upgrade() -> None:
                     close,
                     volume
                 FROM candlesticks
-                WHERE instrument_id = :inst_id
+                WHERE instrument_id = '{inst_lit}'
             )
             SELECT
                 bucket_ts AS ts,
-                :inst_id::varchar(30)                AS instrument_id,
+                '{inst_lit}'::varchar(30)                AS instrument_id,
                 (array_agg(open  ORDER BY ts ASC))[1]  AS open,
                 max(high)                              AS high,
                 min(low)                               AS low,
@@ -111,7 +112,7 @@ def upgrade() -> None:
             GROUP BY bucket_ts
             ORDER BY bucket_ts;
             """
-            conn.execute(sa.text(create_sql), {"inst_id": inst_id})
+            conn.execute(sa.text(create_sql))
             conn.execute(sa.text(f"CREATE UNIQUE INDEX IF NOT EXISTS {idx_name} ON {view_name} (ts);"))
 
 
@@ -119,14 +120,14 @@ def downgrade() -> None:
     conn = op.get_bind()
     # Drop any mv_candlesticks_<sym>_<tf> created from market_caps top 100 snapshot
     tf_buckets = _time_buckets()
-    latest_ts = conn.execute(sa.text("SELECT max(snapshot_ts) FROM market_caps")).scalar()
+    latest_ts = conn.execute(sa.text("SELECT max(snapshot_ts) FROM cmc_market_caps")).scalar()
     if latest_ts is None:
         return
     rows = conn.execute(
         sa.text(
             """
             SELECT symbol
-            FROM market_caps
+            FROM cmc_market_caps
             WHERE snapshot_ts = :ts
             ORDER BY market_cap_usd DESC
             LIMIT 100

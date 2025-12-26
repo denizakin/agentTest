@@ -1,7 +1,7 @@
 """add run logging tables for backtest/opt/wfo results
 
 Revision ID: 7d2c3b4e6f10
-Revises: 31558d4
+Revises: 6c7f9c1d2e3f
 Create Date: 2025-11-03 12:00:00
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = "7d2c3b4e6f10"
-down_revision = "31558d4"
+down_revision = "6c7f9c1d2e3f"
 branch_labels = None
 depends_on = None
 
@@ -73,4 +73,3 @@ def downgrade() -> None:
     op.drop_index("ix_run_headers_inst_tf", table_name="run_headers")
     op.drop_index("ix_run_headers_type_ts", table_name="run_headers")
     op.drop_table("run_headers")
-
