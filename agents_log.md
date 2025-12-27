@@ -85,3 +85,13 @@
   - Test DB: `python src/main_db.py --echo`
   - Ingest: `python src/main_ingest.py --inst BTC-USDT --bar 1m --limit 50`
   - Migrate: `.\.venv\Scripts\alembic.exe -c alembic.ini upgrade head`
+## 2025-12-28
+- Architecture & Stack (proposal)
+  - Frontend: React+Vite, Mantine/Chakra, React Query, React Router, React Hook Form+Zod, TradingView Lightweight Charts wrapper; pages: Coins, Strategies, Backtests, Optimization, WF Analysis, Activity; components: JobProgress, MetricsPanel, TradesTable, StrategyForm.
+  - Backend: FastAPI + Pydantic; SQLAlchemy + Alembic; PostgreSQL/Timescale; Celery or RQ with Redis for long-running jobs; WebSocket/SSE for live logs/metrics; artifacts as JSON/CSV/PNG under resources/results or object storage.
+- API Surface (draft)
+  - /coins/top, /strategies CRUD, /backtests (POST queues job, GET detail/stream), /optimizations, /wf, /jobs with rerun.
+- Next Steps
+  - Scaffold FastAPI + DB + queue; stub /strategies, /coins/top, /backtests.
+  - Add worker to run backtests (mock metrics/equity) and push progress via pub/sub.
+  - Scaffold React app with chart wrapper and Backtests list/detail using mock data.
