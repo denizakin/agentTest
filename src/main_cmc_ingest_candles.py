@@ -1,7 +1,7 @@
-"""CLI: Fetch top-N coins from CoinMarketCap, then ingest OKX candlesticks incrementally.
+"""CLI: Read latest top-N from cmc_market_caps, then ingest OKX candlesticks incrementally.
 
 Behavior:
-- Pull top N (default 100) by market cap from CMC.
+- Pull top N (default 100) by market cap from the latest cmc_market_caps snapshot.
 - For each symbol, assume USDT spot pair on OKX (e.g., BTC -> BTC-USDT).
 - Determine last stored candle ts in DB; start from there +1ms, otherwise 2017-01-01 UTC.
 - Fetch candlesticks from OKX up to now, upserting into `candlesticks`.
@@ -12,12 +12,11 @@ Usage example:
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import time
-import urllib.request
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
+
+from sqlalchemy import text
 
 from api.okx_market_data_client import OkxMarketDataClient
 from config import load_env_file
@@ -30,61 +29,20 @@ START_TS = datetime(2017, 1, 1, tzinfo=timezone.utc)
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="CMC -> OKX candlestick ingester for top market cap assets")
-    p.add_argument("--limit", type=int, default=100, help="How many top assets to fetch from CMC")
-    p.add_argument("--convert", default="USD", help="CMC convert symbol (default USD)")
+    p.add_argument("--limit", type=int, default=100, help="How many top assets to pull from cmc_market_caps")
     p.add_argument("--bar", default="1m", help="OKX candle granularity (e.g., 1m, 1h, 1d)")
     p.add_argument("--per-req", dest="per_req", type=int, default=300, help="Rows per OKX request (<=300)")
-    p.add_argument("--max-rows", dest="max_rows", type=int, default=200_000, help="Max rows per instrument")
+    p.add_argument(
+        "--max-rows",
+        dest="max_rows",
+        type=int,
+        default=0,
+        help="Optional max rows per instrument (0=unlimited)",
+    )
     p.add_argument("--sleep", dest="sleep_sec", type=float, default=0.2, help="Sleep seconds between OKX requests")
     p.add_argument("--use-history-first", action="store_true", help="Start with history endpoint for deeper range")
     p.add_argument("--echo", action="store_true", help="Enable SQLAlchemy engine echo")
     return p.parse_args()
-
-
-def _fetch_cmc_listings(api_key: str, limit: int, convert: str) -> List[dict]:
-    params = f"limit={limit}&convert={convert.upper()}"
-    url = f"https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest?{params}"
-    req = urllib.request.Request(
-        url,
-        headers={
-            "X-CMC_PRO_API_KEY": api_key,
-            "Accept": "application/json",
-        },
-    )
-    with urllib.request.urlopen(req) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
-
-    status = payload.get("status") or {}
-    if status.get("error_code"):
-        raise RuntimeError(f"CMC error {status.get('error_code')}: {status.get('error_message')}")
-
-    return payload.get("data") or []
-
-
-def _is_stablecoin(item: dict) -> bool:
-    symbol = (item.get("symbol") or "").upper()
-    tags = [t.lower() for t in (item.get("tags") or []) if isinstance(t, str)]
-    if any("stablecoin" in t for t in tags):
-        return True
-    # Fallback symbol-based list for safety
-    known = {
-        "USDT",
-        "USDC",
-        "DAI",
-        "TUSD",
-        "BUSD",
-        "FDUSD",
-        "USDD",
-        "PYUSD",
-        "GUSD",
-        "USDP",
-        "LUSD",
-        "FRAX",
-        "EURS",
-        "EURT",
-        "EURL",
-    }
-    return symbol in known
 
 
 def _fmt_ms(val: Optional[int]) -> str:
@@ -102,20 +60,26 @@ def ingest_instrument(
     session,
     instrument_id: str,
     since_ms: int,
-    max_rows: int,
+    max_rows: Optional[int],
     per_request: int,
     sleep_sec: float,
     bar: str,
     use_history_first: bool = False,
 ) -> int:
+    max_rows_limit = max_rows if max_rows and max_rows > 0 else None
     total_upserted = 0
     after_cursor: Optional[str] = None  # start from latest
     last_oldest_ts: Optional[int] = None
     use_history = use_history_first
 
-    while total_upserted < max_rows:
-        remain = max_rows - total_upserted
-        per_req = max(1, min(int(per_request), 300, remain))
+    while True:
+        per_req = max(1, min(int(per_request), 300))
+        if max_rows_limit is not None:
+            remain = max_rows_limit - total_upserted
+            if remain <= 0:
+                print(f"  [{instrument_id}] reached max_rows limit={max_rows_limit}; stopping.")
+                break
+            per_req = min(per_req, remain)
 
         # Fetch page with retry/backoff (simple, single retry loop)
         attempt = 0
@@ -138,11 +102,11 @@ def ingest_instrument(
                 break
             except Exception as exc:
                 attempt += 1
-                if attempt > 3:
-                    print(f"  [{instrument_id}] failed after retries: {exc}")
+                if attempt > 10:
+                    print(f"  [{instrument_id}] failed after retries (10): {exc}")
                     return total_upserted
                 delay = 0.5 * (2 ** (attempt - 1))
-                print(f"  [{instrument_id}] transient error: {exc}; retrying in {delay:.2f}s (attempt {attempt}/3)")
+                print(f"  [{instrument_id}] transient error: {exc}; retrying in {delay:.2f}s (attempt {attempt}/10)")
                 time.sleep(delay)
 
         data = resp.get("data") or []
@@ -190,36 +154,46 @@ def ingest_instrument(
     return total_upserted
 
 
+def _load_symbols_from_db(db: DbConn, limit: int) -> List[str]:
+    """Read latest snapshot from cmc_market_caps, return top-N symbols."""
+    with db.engine.connect() as conn:
+        latest_ts = conn.execute(text("SELECT max(snapshot_ts) FROM cmc_market_caps")).scalar_one_or_none()
+        if latest_ts is None:
+            return []
+
+        rows = conn.execute(
+            text(
+                """
+                SELECT symbol
+                FROM cmc_market_caps
+                WHERE snapshot_ts = :ts
+                ORDER BY market_cap_usd DESC
+                LIMIT :limit
+                """
+            ),
+            {"ts": latest_ts, "limit": int(limit)},
+        ).fetchall()
+
+    symbols = [r[0] for r in rows if r and r[0]]
+    return symbols
+
+
 def main() -> int:
     load_env_file()
     args = parse_args()
 
-    api_key = os.getenv("CMC_API_KEY")
-    if not api_key:
-        print("Missing CMC_API_KEY in environment/resources/.env")
-        return 2
-
-    try:
-        listings = _fetch_cmc_listings(api_key=api_key, limit=args.limit, convert=args.convert)
-    except Exception as exc:
-        print(f"Failed to fetch CoinMarketCap listings: {exc}")
-        return 1
-
-    filtered = [item for item in listings if item.get("symbol") and not _is_stablecoin(item)]
-    if not filtered:
-        print("No non-stablecoin symbols from CMC response; aborting.")
-        return 1
-
-    symbols = [item.get("symbol") for item in filtered]
-    if len(symbols) < len(listings):
-        skipped = len(listings) - len(symbols)
-        print(f"Skipped {skipped} stablecoin entries; proceeding with {len(symbols)} symbols.")
-
     db = DbConn(echo=args.echo)
+    run_started = datetime.now(timezone.utc)
+    print(f"Run started at {run_started.isoformat()}")
+    symbols = _load_symbols_from_db(db, args.limit)
+    if not symbols:
+        print("No symbols found in cmc_market_caps; run main_cmc_market_caps.py first.")
+        return 1
+
     repo = CandlesRepo()
     client = OkxMarketDataClient()
 
-    print(f"Processing {len(symbols)} symbols from CMC top list...")
+    print(f"Processing {len(symbols)} symbols from latest cmc_market_caps snapshot...")
     with db.session_scope() as session:
         for sym in symbols:
             inst_id = f"{sym.upper()}-USDT"
@@ -242,6 +216,9 @@ def main() -> int:
             session.commit()
             print(f"  [{inst_id}] done, upserted {upserted} rows.")
 
+    run_finished = datetime.now(timezone.utc)
+    duration = run_finished - run_started
+    print(f"Run finished at {run_finished.isoformat()} (duration {duration})")
     return 0
 
 

@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import List
 
+from sqlalchemy import text
+
 from config import load_env_file
 from db.db_conn import DbConn
 from db.market_caps_repo import MarketCapsRepo, MarketCapRow
@@ -48,6 +50,34 @@ def _fetch_cmc_listings(api_key: str, limit: int, convert: str) -> List[dict]:
     return data
 
 
+def _is_stablecoin(item: dict) -> bool:
+    """Return True when the CMC listing is a stablecoin."""
+    symbol = (item.get("symbol") or "").upper()
+    tags = [t.lower() for t in (item.get("tags") or []) if isinstance(t, str)]
+    if any("stablecoin" in t for t in tags):
+        return True
+
+    # Fallback symbol list for safety
+    known = {
+        "USDT",
+        "USDC",
+        "DAI",
+        "TUSD",
+        "BUSD",
+        "FDUSD",
+        "USDD",
+        "PYUSD",
+        "GUSD",
+        "USDP",
+        "LUSD",
+        "FRAX",
+        "EURS",
+        "EURT",
+        "EURL",
+    }
+    return symbol in known
+
+
 def main() -> int:
     load_env_file()
     args = parse_args()
@@ -66,7 +96,13 @@ def main() -> int:
     snapshot_ts = datetime.now(timezone.utc)
     rows: List[MarketCapRow] = []
     convert_key = args.convert.upper()
-    for item in listings:
+    # Drop stablecoins to keep MVs focused on non-stable assets
+    filtered = [item for item in listings if item and not _is_stablecoin(item)]
+    skipped = len(listings) - len(filtered)
+    if skipped:
+        print(f"Skipped {skipped} stablecoin entries from CMC response.")
+
+    for item in filtered:
         symbol = item.get("symbol")
         quote = (item.get("quote") or {}).get(convert_key) or {}
         mc_val = quote.get("market_cap")
@@ -80,6 +116,8 @@ def main() -> int:
     repo = MarketCapsRepo()
     db = DbConn(echo=args.echo)
     with db.session_scope() as s:
+        # Start fresh on each fetch to keep only the latest snapshot
+        s.execute(text("TRUNCATE TABLE cmc_market_caps"))
         affected = repo.upsert_many(s, rows)
 
     print(f"Fetched {len(listings)} listings, parsed {len(rows)} rows, upserted {affected} rows at {snapshot_ts.isoformat()}")
