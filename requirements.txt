@@ -5,3 +5,5 @@ alembic>=1.13
 psycopg2-binary>=2.9
 backtrader[plotting]
 pandas>=2.0
+fastapi>=0.115
+uvicorn[standard]>=0.27

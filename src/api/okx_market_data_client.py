@@ -13,7 +13,15 @@ else:
 
 
 class OkxApiError(RuntimeError):
-    """Raised when the OKX API responds with an error or the request fails."""
+    """Raised when the OKX API responds with an error or the request fails.
+
+    Attributes:
+        code: Optional OKX error code (string or int).
+    """
+
+    def __init__(self, message: str, code: Optional[object] = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class OkxMarketDataClient:
@@ -97,7 +105,7 @@ class OkxMarketDataClient:
             code = response.get("code")
             if code not in (None, "0", 0):
                 message = response.get("msg") or response.get("message") or "unknown error"
-                raise OkxApiError(f"OKX API error {code}: {message}")
+                raise OkxApiError(f"OKX API error {code}: {message}", code=code)
         return response
 
     def _build_market_api(self) -> Any:
@@ -159,5 +167,5 @@ class OkxMarketDataClient:
             code = response.get("code")
             if code not in (None, "0", 0):
                 message = response.get("msg") or response.get("message") or "unknown error"
-                raise OkxApiError(f"OKX API error {code}: {message}")
+                raise OkxApiError(f"OKX API error {code}: {message}", code=code)
         return response

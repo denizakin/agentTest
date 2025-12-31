@@ -18,7 +18,7 @@ from typing import List, Optional
 
 from sqlalchemy import text
 
-from api.okx_market_data_client import OkxMarketDataClient
+from api.okx_market_data_client import OkxMarketDataClient, OkxApiError
 from config import load_env_file
 from db.candles_repo import CandlesRepo, parse_okx_candle_row
 from db.db_conn import DbConn
@@ -100,6 +100,17 @@ def ingest_instrument(
                         after=after_cursor,
                     )
                 break
+            except OkxApiError as exc:
+                if str(getattr(exc, "code", "")).strip() == "51001":
+                    print(f"  [{instrument_id}] non-retryable OKX error 51001: {exc}")
+                    return total_upserted
+                attempt += 1
+                if attempt > 10:
+                    print(f"  [{instrument_id}] failed after retries (10): {exc}")
+                    return total_upserted
+                delay = 0.5 * (2 ** (attempt - 1))
+                print(f"  [{instrument_id}] transient error: {exc}; retrying in {delay:.2f}s (attempt {attempt}/10)")
+                time.sleep(delay)
             except Exception as exc:
                 attempt += 1
                 if attempt > 10:

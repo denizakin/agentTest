@@ -89,9 +89,24 @@
 - Architecture & Stack (proposal)
   - Frontend: React+Vite, Mantine/Chakra, React Query, React Router, React Hook Form+Zod, TradingView Lightweight Charts wrapper; pages: Coins, Strategies, Backtests, Optimization, WF Analysis, Activity; components: JobProgress, MetricsPanel, TradesTable, StrategyForm.
   - Backend: FastAPI + Pydantic; SQLAlchemy + Alembic; PostgreSQL/Timescale; Celery or RQ with Redis for long-running jobs; WebSocket/SSE for live logs/metrics; artifacts as JSON/CSV/PNG under resources/results or object storage.
-- API Surface (draft)
+  - API Surface (draft)
   - /coins/top, /strategies CRUD, /backtests (POST queues job, GET detail/stream), /optimizations, /wf, /jobs with rerun.
 - Next Steps
   - Scaffold FastAPI + DB + queue; stub /strategies, /coins/top, /backtests.
   - Add worker to run backtests (mock metrics/equity) and push progress via pub/sub.
   - Scaffold React app with chart wrapper and Backtests list/detail using mock data.
+## 2025-12-29
+- Summary
+  - Added FastAPI scaffold at `src/app.py` with `/health`, `/coins/top`, `/strategies`, `/backtests` stub endpoints.
+  - Introduced dependency providers in `src/web/deps.py` for DB sessions and a queue handle.
+  - Added minimal in-memory queue abstraction (`src/taskqueue`) and placeholder worker loop.
+  - Added `strategies` table (Alembic revision `a1b2c3d4e6f7`), SQLAlchemy model, repository, and wired `/strategies` API to the DB.
+  - Added `mv_coin_instruments` materialized view (revision `b2c3d4e5f6a7`) and `/coins/top` now reads from it.
+  - Implemented backtest persistence via `run_headers` using `BacktestsRepo` and wired `/backtests` list/create to DB and queue.
+- Next Steps
+  - Replace in-memory queue with Redis-backed RQ or Celery worker and persist jobs to DB.
+  - Flesh out repositories/services for strategies, coins, and backtests; return real data.
+  - Add auth, logging, metrics, and request validation once endpoints stabilize.
+- Handy Commands
+  - Run API (dev): `uvicorn src.app:app --reload`
+  - Alembic upgrade: `.\.venv\Scripts\alembic.exe -c alembic.ini upgrade head`

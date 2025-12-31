@@ -14,7 +14,7 @@ from typing import List, Optional
 from config import load_env_file
 from db.db_conn import DbConn
 from db.candles_repo import CandlesRepo, parse_okx_candle_row
-from api.okx_market_data_client import OkxMarketDataClient
+from api.okx_market_data_client import OkxMarketDataClient, OkxApiError
 
 
 def parse_args() -> argparse.Namespace:
@@ -147,6 +147,18 @@ def main() -> int:
                         after=after_cursor,
                     )
                 break
+            except OkxApiError as exc:
+                # Do not retry on specific non-transient code 51001
+                if str(getattr(exc, "code", "")).strip() == "51001":
+                    print(f"Failed with non-retryable OKX error 51001: {exc}")
+                    return 2
+                attempt += 1
+                if attempt > max(0, int(args.retries)):
+                    print(f"Failed after retries: {exc}")
+                    return 2
+                delay = max(0.0, float(args.backoff)) * (float(args.backoff_mult) ** (attempt - 1))
+                print(f"Transient error: {exc}; retrying in {delay:.2f}s (attempt {attempt}/{args.retries})")
+                time.sleep(delay)
             except Exception as exc:
                 attempt += 1
                 if attempt > max(0, int(args.retries)):
