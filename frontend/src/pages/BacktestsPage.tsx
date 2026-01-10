@@ -75,7 +75,7 @@ export default function BacktestsPage() {
               value={strategyId}
               onChange={setStrategyId}
               searchable
-              nothingFound="No strategies"
+              nothingFoundMessage="No strategies"
             />
             <Select
               label="Instrument"
@@ -84,7 +84,7 @@ export default function BacktestsPage() {
               value={instrumentId}
               onChange={(v) => setInstrumentId(v || "")}
               searchable
-              nothingFound="No instruments"
+              nothingFoundMessage="No instruments"
             />
             <TextInput label="Bar" value={bar} onChange={(e) => setBar(e.currentTarget.value)} placeholder="1h" />
           </Group>

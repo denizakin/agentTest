@@ -4,9 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import load_env_file
-from db.db_conn import DbConn
 from web.routes import backtests, coins, strategies, ui, jobs
-from web.worker import start_background_worker
 
 
 def create_app() -> FastAPI:
@@ -29,10 +27,6 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    # Initialize DB and start background worker for in-memory queue (dev placeholder).
-    db_conn = DbConn()
-    start_background_worker(db_conn)
 
     @app.get("/health")
     def health() -> dict[str, str]:
