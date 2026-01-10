@@ -57,7 +57,7 @@ def list_backtests(
             BacktestSummary(
                 run_id=r.id,
                 job_id="n/a",
-                strategy_id=0,
+                strategy_id=r.strategy_id or 0,
                 strategy_name=r.strategy,
                 instrument_id=r.instrument_id,
                 bar=r.timeframe,
@@ -87,6 +87,7 @@ def enqueue_backtest(
     run = backtests_repo.create(
         session,
         NewBacktest(
+            strategy_id=payload.strategy_id,
             instrument_id=payload.instrument_id,
             timeframe=payload.bar,
             strategy_name=strat.name,
@@ -124,7 +125,7 @@ def get_backtest(run_id: int, session: Session = Depends(get_db)) -> BacktestSum
     return BacktestSummary(
         run_id=run.id,
         job_id="n/a",
-        strategy_id=0,
+        strategy_id=run.strategy_id or 0,
         strategy_name=run.strategy,
         instrument_id=run.instrument_id,
         bar=run.timeframe,

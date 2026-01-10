@@ -10,6 +10,7 @@ class RunHeader(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     run_type = Column(String(20), nullable=False)  # e.g., backtest, optimize
+    strategy_id = Column(Integer, ForeignKey("strategies.strategy_id", ondelete="SET NULL"), nullable=True)
     instrument_id = Column(String(30), nullable=False)
     timeframe = Column(String(10), nullable=False)
     strategy = Column(String(50), nullable=False)

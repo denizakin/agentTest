@@ -12,6 +12,7 @@ from db.poco.run_header import RunHeader
 
 @dataclass(frozen=True)
 class NewBacktest:
+    strategy_id: int
     instrument_id: str
     timeframe: str
     strategy_name: str
@@ -25,6 +26,7 @@ class BacktestsRepo:
     def create(self, session: Session, new_bt: NewBacktest) -> RunHeader:
         run = RunHeader(
             run_type="backtest",
+            strategy_id=new_bt.strategy_id,
             instrument_id=new_bt.instrument_id,
             timeframe=new_bt.timeframe,
             strategy=new_bt.strategy_name,

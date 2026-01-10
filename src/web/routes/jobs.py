@@ -58,6 +58,7 @@ def enqueue_backtest_job(
     run = backtests_repo.create(
         session,
         NewBacktest(
+            strategy_id=payload.strategy_id,
             instrument_id=payload.instrument_id,
             timeframe=payload.bar,
             strategy_name=strat.name,
