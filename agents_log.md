@@ -103,6 +103,7 @@
   - Added `strategies` table (Alembic revision `a1b2c3d4e6f7`), SQLAlchemy model, repository, and wired `/strategies` API to the DB.
   - Added `mv_coin_instruments` materialized view (revision `b2c3d4e5f6a7`) and `/coins/top` now reads from it.
   - Implemented backtest persistence via `run_headers` using `BacktestsRepo` and wired `/backtests` list/create to DB and queue.
+  - Added job endpoint `/jobs/backtest` to persist run_headers and enqueue backtest execution jobs (higher-level script analog).
 - Next Steps
   - Replace in-memory queue with Redis-backed RQ or Celery worker and persist jobs to DB.
   - Flesh out repositories/services for strategies, coins, and backtests; return real data.
@@ -110,3 +111,18 @@
 - Handy Commands
   - Run API (dev): `uvicorn src.app:app --reload`
   - Alembic upgrade: `.\.venv\Scripts\alembic.exe -c alembic.ini upgrade head`
+## 2025-12-30
+- Summary
+  - Scaffoled frontend under `frontend/` (Vite + React + TS, Mantine, React Router, React Query, RHF+Zod) with mock-only pages: Coins, Strategies, Backtests, Optimization, WF Analysis, Activity; components: SidebarNav, JobProgress, MetricsPanel, TradesTable, StrategyForm.
+  - Added frontend deps including @tabler/icons-react; pnpm install/dev now works after installing missing icon package.
+  - Wired frontend pages to real API: `/coins/top` (React Query list), `/strategies` GET/POST with form + notifications, `/backtests` list from `run_headers`; API base configurable via `VITE_API_URL` (default http://127.0.0.1:8000).
+  - Added DB status tracking for backtests (`run_headers` status/progress/error via migration `c3d4e5f6a7b8`), updated backtest APIs (list/detail) and frontend to show real status/progress/error.
+  - Added dev background worker (in-app thread) consuming in-memory queue; marks backtests running/succeeded as a placeholder until real executor/queue.
+  - Added DB-backed worker entrypoint `worker_main.py` (threaded, configurable concurrency) and `manager_main.py` to auto-scale worker processes based on queued jobs (SKIP LOCKED polling).
+  - Worker now executes real backtests via Backtrader: loads strategy code from DB, pulls candles from `candlesticks`, runs Cerebro, and updates run status/progress (placeholder metrics).
+  - Added run_logs table (migration `d4e5f6a7b8c9`), logging repo/endpoints (`/backtests/{id}/logs`), worker writes log entries; frontend Backtests page can view logs and set start/end via date pickers.
+- Next Steps
+  - Optionally wire frontend to real API endpoints (`/coins/top`, `/strategies`, `/backtests`) and add TradingView lightweight chart mock last.
+  - Add auth/logging/metrics and choose layout polish once data wiring is in.
+- Handy Commands
+  - Frontend dev: `cd frontend && pnpm install && pnpm dev` (http://localhost:5173)

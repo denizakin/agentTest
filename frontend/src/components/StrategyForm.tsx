@@ -13,11 +13,13 @@ const schema = z.object({
 type FormValues = z.infer<typeof schema>;
 
 type Props = {
-  onSubmit?: (values: FormValues) => void;
+  onSubmit?: (values: FormValues) => void | Promise<void>;
   defaultValues?: Partial<FormValues>;
+  submitting?: boolean;
+  submitLabel?: string;
 };
 
-export default function StrategyForm({ onSubmit, defaultValues }: Props) {
+export default function StrategyForm({ onSubmit, defaultValues, submitting = false, submitLabel = "Save" }: Props) {
   const {
     register,
     handleSubmit,
@@ -33,7 +35,7 @@ export default function StrategyForm({ onSubmit, defaultValues }: Props) {
   });
 
   const submit = (values: FormValues) => {
-    onSubmit?.(values);
+    return onSubmit?.(values);
   };
 
   const status = watch("status");
@@ -57,7 +59,9 @@ export default function StrategyForm({ onSubmit, defaultValues }: Props) {
           <Textarea label="Notes" minRows={3} {...register("notes")} />
           <Textarea label="Code (optional)" minRows={6} placeholder="# pseudo-code" {...register("code")} />
           <Group justify="flex-end">
-            <Button type="submit">Save</Button>
+            <Button type="submit" loading={submitting}>
+              {submitLabel}
+            </Button>
           </Group>
         </Stack>
       </form>

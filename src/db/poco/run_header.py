@@ -23,4 +23,6 @@ class RunHeader(Base):
     started_at = Column(DateTime(timezone=True), nullable=False)
     ended_at = Column(DateTime(timezone=True), nullable=True)
     notes = Column(Text, nullable=True)
-
+    status = Column(String(20), nullable=False, default="queued")
+    progress = Column(Integer, nullable=False, default=0)
+    error = Column(Text, nullable=True)
