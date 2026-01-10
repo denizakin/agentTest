@@ -151,7 +151,7 @@ def worker_loop(worker_id: int, db: DbConn, stop_event: threading.Event) -> None
 
 def main() -> None:
     load_env_file()
-    db = DbConn()
+    db = DbConn(echo=True)
     stop_event = threading.Event()
     threads: list[threading.Thread] = []
     for idx in range(CONCURRENCY):
