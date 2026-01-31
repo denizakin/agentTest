@@ -11,6 +11,8 @@ import re
 from datetime import datetime, timezone
 from typing import List, Optional
 
+from sqlalchemy import text
+
 from config import load_env_file
 from db.db_conn import DbConn
 from db.candles_repo import CandlesRepo, parse_okx_candle_row
@@ -56,6 +58,7 @@ def parse_args() -> argparse.Namespace:
         help="Start pagination with OKX history candles endpoint instead of standard candles",
     )
     p.add_argument("--echo", action="store_true", help="Enable SQLAlchemy engine echo")
+    p.add_argument("--refresh-mv", action="store_true", help="Create/refresh per-instrument MV after ingest")
     return p.parse_args()
 
 
@@ -95,6 +98,50 @@ def _parse_time_to_ms(value: Optional[str]) -> Optional[int]:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return int(dt.timestamp() * 1000)
+
+
+def _mv_name(inst: str, bar: str) -> str:
+    inst_slug = inst.lower().replace("-", "_")
+    bar_slug = bar.lower()
+    return f"mv_candlesticks_{inst_slug}_{bar_slug}"
+
+
+def ensure_and_refresh_mv(db: DbConn, inst: str, bar: str) -> None:
+    """Create (if missing) and refresh a per-instrument MV for the ingested instrument/timeframe."""
+    view = _mv_name(inst, bar)
+    create_sql = f"""
+        CREATE MATERIALIZED VIEW IF NOT EXISTS {view} AS
+        SELECT ts, instrument_id, open, high, low, close, volume
+        FROM candlesticks
+        WHERE instrument_id = :inst
+        ORDER BY ts ASC;
+    """
+    idx_sql = f"CREATE INDEX IF NOT EXISTS ix_{view}_ts ON {view}(ts);"
+    refresh_sql = f"REFRESH MATERIALIZED VIEW CONCURRENTLY {view};"
+    refresh_fallback_sql = f"REFRESH MATERIALIZED VIEW {view};"
+
+    with db.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        try:
+            conn.execute(text(create_sql), {"inst": inst})
+            conn.execute(text(idx_sql))
+            try:
+                conn.execute(text(refresh_sql))
+            except Exception:
+                # Fall back to non-concurrent refresh if concurrent not possible
+                conn.execute(text(refresh_fallback_sql))
+            print(f"Materialized view refreshed: {view}")
+        except Exception as exc:
+            print(f"MV refresh failed for {view}: {exc}")
+
+
+DEFAULT_MV_BARS = ["1m", "5m", "15m", "1h", "4h", "1d", "1w", "1mo"]
+
+
+def ensure_and_refresh_mv_multi(db: DbConn, inst: str, bars: Optional[list[str]] = None) -> None:
+    """Refresh a predefined set of MVs for an instrument."""
+    targets = bars or DEFAULT_MV_BARS
+    for b in targets:
+        ensure_and_refresh_mv(db, inst, b)
 
 
 def main() -> int:
@@ -236,6 +283,12 @@ def main() -> int:
         # Respect rate limits a bit
         if args.sleep_sec > 0:
             time.sleep(args.sleep_sec)
+
+    if args.refresh_mv:
+        try:
+            ensure_and_refresh_mv(db, args.instrument_id, args.bar)
+        except Exception as exc:
+            print(f"Post-ingest MV refresh failed: {exc}")
 
     return 0
 

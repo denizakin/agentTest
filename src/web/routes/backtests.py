@@ -6,17 +6,21 @@ from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, status, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from datetime import datetime
 
 from db.backtests_repo import BacktestsRepo, NewBacktest
 from db.run_logs_repo import RunLogsRepo
+from db.run_results_repo import RunResultsRepo
 from db.strategies_repo import StrategiesRepo
 from taskqueue.types import Job, JobQueue
 from web.deps import get_db, get_job_queue
+from sqlalchemy import text
 
 router = APIRouter(prefix="/backtests", tags=["backtests"])
 backtests_repo = BacktestsRepo()
 strategies_repo = StrategiesRepo()
 runlogs_repo = RunLogsRepo()
+runresults_repo = RunResultsRepo()
 
 
 class BacktestRequest(BaseModel):
@@ -39,6 +43,8 @@ class BacktestSummary(BaseModel):
     submitted_at: datetime
     progress: int = 0
     error: Optional[str] = None
+    start_ts: Optional[str] = None
+    end_ts: Optional[str] = None
 
 
 @router.get("", response_model=List[BacktestSummary])
@@ -53,6 +59,7 @@ def list_backtests(
     rows = backtests_repo.list_recent(session, limit=limit, offset=offset)
     summaries: List[BacktestSummary] = []
     for r in rows:
+        params = r.params or {}
         summaries.append(
             BacktestSummary(
                 run_id=r.id,
@@ -65,6 +72,8 @@ def list_backtests(
                 submitted_at=r.started_at,
                 progress=getattr(r, "progress", 0) or 0,
                 error=getattr(r, "error", None),
+                start_ts=params.get("start_ts"),
+                end_ts=params.get("end_ts"),
             )
         )
     return summaries
@@ -149,3 +158,169 @@ def list_backtest_logs(run_id: int, limit: int = 200, offset: int = 0, session: 
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="backtest not found")
     logs = runlogs_repo.list_logs(session, run_id, limit=limit, offset=offset)
     return [RunLogItem(ts=log.ts, level=log.level, message=log.message) for log in logs]
+
+
+from typing import Optional, Dict, Any
+
+
+class RunResultItem(BaseModel):
+    label: str
+    params: Optional[Dict[str, Any]] = None
+    metrics: Optional[Dict[str, Any]] = None
+    plot_path: Optional[str] = None
+
+
+@router.get("/{run_id}/results", response_model=List[RunResultItem])
+def list_backtest_results(run_id: int, session: Session = Depends(get_db)) -> List[RunResultItem]:
+    run = backtests_repo.get(session, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="backtest not found")
+    rows = runresults_repo.list_by_run(session, run_id)
+    return [RunResultItem(label=r.label, params=r.params, metrics=r.metrics, plot_path=r.plot_path) for r in rows]
+
+
+# ---- Chart endpoint ----
+class ChartCandle(BaseModel):
+    time: str  # ISO timestamp
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+class ChartSignal(BaseModel):
+    time: str  # ISO timestamp
+    side: str  # BUY/SELL
+    price: Optional[float] = None
+    message: Optional[str] = None
+
+
+class ChartResponse(BaseModel):
+    candles: List[ChartCandle]
+    signals: List[ChartSignal]
+
+
+def _mv_name(inst: str, tf: str) -> str:
+    tf_norm = tf.lower()
+    allowed = {"1m", "5m", "15m", "1h", "4h", "1d", "1w", "1mo"}
+    if tf_norm not in allowed:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"unsupported bar: {tf}")
+    # Extract coin symbol (BTC-USDT -> btc, ETH-USDT -> eth)
+    inst_lower = inst.lower()
+    if "-" in inst_lower:
+        coin = inst_lower.split("-")[0]
+    else:
+        coin = inst_lower
+    return f"mv_candlesticks_{coin}_{tf_norm}"
+
+
+def _parse_signals_from_logs(logs: List[RunLogItem]) -> List[ChartSignal]:
+    import re
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    sigs: List[ChartSignal] = []
+    pattern = re.compile(r"ORDER\s+(BUY|SELL)\s+EXECUTED", re.IGNORECASE)
+    price_re = re.compile(r"price=([0-9.+,\\-eE]+)")
+    # Parse datetime from log message (format: "2024-01-01T12:00:00+00:00 - ORDER BUY EXECUTED...")
+    datetime_re = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?)")
+    istanbul_tz = ZoneInfo("Europe/Istanbul")
+
+    for log in logs:
+        m = pattern.search(log.message)
+        if not m:
+            continue
+        side = m.group(1).upper()
+
+        # Try to extract datetime from message
+        signal_time = log.ts.isoformat()  # fallback to log timestamp
+        dt_match = datetime_re.match(log.message)
+        if dt_match:
+            dt_str = dt_match.group(1)
+            # Parse the datetime string
+            try:
+                # Try to parse with timezone info
+                dt = datetime.fromisoformat(dt_str)
+                # If no timezone info (naive datetime), assume Istanbul timezone
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=istanbul_tz)
+                signal_time = dt.isoformat()
+            except Exception:
+                # If parsing fails, keep original string
+                signal_time = dt_str
+
+        price_match = price_re.search(log.message)
+        price = None
+        if price_match:
+            raw = price_match.group(1)
+            try:
+                price = float(raw.replace(",", ""))
+            except Exception:
+                price = None
+        sigs.append(ChartSignal(time=signal_time, side=side, price=price, message=log.message))
+    return sigs
+
+
+@router.get("/{run_id}/chart", response_model=ChartResponse)
+def get_backtest_chart(run_id: int, session: Session = Depends(get_db)) -> ChartResponse:
+    run = backtests_repo.get(session, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="backtest not found")
+
+    params = run.params or {}
+    start_ts = params.get("start_ts")
+    end_ts = params.get("end_ts")
+
+    # For 1m, use base table; otherwise use MV
+    if run.timeframe.lower() == "1m":
+        view = "candlesticks"
+        where: List[str] = [f"instrument_id = :instrument_id"]
+        sql_params: Dict[str, Any] = {"instrument_id": run.instrument_id}
+    else:
+        view = _mv_name(run.instrument_id, run.timeframe)
+        where = []
+        sql_params = {}
+
+    if start_ts:
+        where.append("ts >= :start_ts")
+        sql_params["start_ts"] = start_ts
+    if end_ts:
+        where.append("ts <= :end_ts")
+        sql_params["end_ts"] = end_ts
+    where_clause = (" WHERE " + " AND ".join(where)) if where else ""
+
+    # Query from MV or base table
+    timeout_ms = 5000
+    try:
+        session.execute(text(f"SET LOCAL statement_timeout = {timeout_ms}"))
+        sql = f"SELECT ts, open, high, low, close, volume FROM {view}{where_clause} ORDER BY ts ASC"
+        rows = session.execute(text(sql), sql_params).all()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"failed to load candles: {exc}"
+        )
+
+    # Convert to ChartCandle objects (data should already be in correct timeframe from MV)
+    # Database stores timestamps in UTC, convert to Istanbul timezone for display
+    from zoneinfo import ZoneInfo
+    istanbul_tz = ZoneInfo("Europe/Istanbul")
+
+    candles = [
+        ChartCandle(
+            time=ts.astimezone(istanbul_tz).isoformat() if ts.tzinfo else ts.replace(tzinfo=timezone.utc).astimezone(istanbul_tz).isoformat(),
+            open=float(o),
+            high=float(h),
+            low=float(l),
+            close=float(c),
+            volume=float(v),
+        )
+        for ts, o, h, l, c, v in rows
+    ]
+
+    logs_raw = runlogs_repo.list_logs(session, run_id, limit=2000, offset=0)
+    logs = [RunLogItem(ts=lr.ts, level=lr.level, message=lr.message) for lr in logs_raw]
+    signals = _parse_signals_from_logs(logs)
+
+    return ChartResponse(candles=candles, signals=signals)

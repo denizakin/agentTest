@@ -18,6 +18,7 @@ class Strategy(BaseModel):
     id: int
     name: str
     status: str = "draft"
+    tag: Optional[str] = None
     notes: Optional[str] = None
     code: Optional[str] = None
 
@@ -25,6 +26,7 @@ class Strategy(BaseModel):
 class CreateStrategyRequest(BaseModel):
     name: str
     status: Literal["draft", "prod", "archived"] = "draft"
+    tag: Optional[str] = None
     notes: Optional[str] = None
     code: Optional[str] = None
 
@@ -34,6 +36,7 @@ def _to_schema(db_obj) -> Strategy:
         id=db_obj.strategy_id,
         name=db_obj.name,
         status=db_obj.status,
+        tag=db_obj.tag,
         notes=db_obj.notes,
         code=db_obj.code,
     )
@@ -59,6 +62,7 @@ def create_strategy(payload: CreateStrategyRequest, session: Session = Depends(g
             NewStrategy(
                 name=payload.name,
                 status=payload.status,
+                tag=payload.tag,
                 notes=payload.notes,
                 code=payload.code,
             ),

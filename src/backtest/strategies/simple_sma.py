@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import backtrader as bt
 
+from .helpers import price_fmt
+
 
 class SimpleSmaStrategy(bt.Strategy):
     """A minimal SMA crossover strategy with logging.
@@ -41,7 +43,7 @@ class SimpleSmaStrategy(bt.Strategy):
         if order.status == order.Completed:
             side = "BUY" if order.isbuy() else "SELL"
             self.log(
-                f"ORDER {side} EXECUTED, price={order.executed.price:.2f}, size={order.executed.size:.6f}, "
+                f"ORDER {side} EXECUTED, price={price_fmt(order.executed.price)}, size={order.executed.size:.6f}, "
                 f"cost={order.executed.value:.2f}, comm={order.executed.comm:.2f}"
             )
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
@@ -65,7 +67,7 @@ class SimpleSmaStrategy(bt.Strategy):
         price = self.data.close[0]
 
         if cross > 0:
-            self.log(f"SIGNAL BUY (cross up) @ close={price:.2f}")
+            self.log(f"SIGNAL BUY (cross up) @ close={price_fmt(price)}")
             if self.p.use_target:
                 self.order = self.order_target_percent(target=float(self.p.invest))
                 self.log(f"order_target_percent to {self.p.invest*100:.1f}% -> order={self.order}")
@@ -74,10 +76,10 @@ class SimpleSmaStrategy(bt.Strategy):
                 size = (cash * float(self.p.invest)) / float(price) if price else 0.0
                 if size < float(self.p.min_size):
                     size = float(self.p.min_size)
-                self.log(f"BUY attempt: cash={cash:.2f} price={price:.2f} size={size:.8f}")
+                self.log(f"BUY attempt: cash={cash:.2f} price={price_fmt(price)} size={size:.8f}")
                 self.order = self.buy(size=size)
         elif cross < 0:
-            self.log(f"SIGNAL SELL (cross down) @ close={price:.2f}")
+            self.log(f"SIGNAL SELL (cross down) @ close={price_fmt(price)}")
             if self.p.use_target:
                 # reduce exposure to 0% (flat)
                 self.order = self.order_target_percent(target=0.0)

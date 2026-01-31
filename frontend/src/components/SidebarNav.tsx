@@ -1,4 +1,4 @@
-import { Stack, NavLink, rem } from "@mantine/core";
+import { Stack, NavLink } from "@mantine/core";
 import { IconActivity, IconChartLine, IconChartPie, IconHome2, IconListCheck, IconRocket, IconSettings } from "@tabler/icons-react";
 import { useLocation, Link } from "react-router-dom";
 
@@ -24,7 +24,7 @@ export default function SidebarNav({ onNavigate }: { onNavigate?: () => void }) 
             component={Link}
             to={item.to}
             label={item.label}
-            leftSection={<Icon size={rem(16)} />}
+            leftSection={<Icon size={16} />}
             active={active}
             variant={active ? "filled" : "light"}
             onClick={onNavigate}

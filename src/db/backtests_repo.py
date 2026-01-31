@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
 from db.poco.run_header import RunHeader
@@ -63,7 +63,7 @@ class BacktestsRepo:
             .with_for_update(skip_locked=True)
             .limit(1)
         )
-        return session.scalar(stmt)
+        return session.scalars(stmt).first()
 
     def get(self, session: Session, run_id: int) -> Optional[RunHeader]:
         return session.get(RunHeader, run_id)
@@ -76,13 +76,19 @@ class BacktestsRepo:
         progress: Optional[int] = None,
         error: Optional[str] = None,
     ) -> None:
-        run = session.get(RunHeader, run_id)
-        if run is None:
-            raise ValueError("run not found")
-        run.status = status
+        values: Dict[str, object] = {"status": status}
         if progress is not None:
-            run.progress = progress
+            values["progress"] = progress
         if error is not None:
-            run.error = error
+            values["error"] = error
         if status in {"succeeded", "failed"}:
-            run.ended_at = datetime.now(tz=timezone.utc)
+            values["ended_at"] = datetime.now(tz=timezone.utc)
+
+        stmt = (
+            update(RunHeader)
+            .where(RunHeader.id == run_id)
+            .values(**values)
+        )
+        result = session.execute(stmt)
+        if result.rowcount == 0:
+            raise ValueError(f"run not found for update_status (id={run_id})")

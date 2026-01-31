@@ -6,6 +6,7 @@ import { z } from "zod";
 const schema = z.object({
   name: z.string().min(2, "Name required"),
   status: z.enum(["draft", "prod", "archived"]),
+  tag: z.string().optional(),
   notes: z.string().optional(),
   code: z.string().optional(),
 });
@@ -56,6 +57,7 @@ export default function StrategyForm({ onSubmit, defaultValues, submitting = fal
             value={status}
             onChange={(val) => setValue("status", (val as FormValues["status"]) || "draft")}
           />
+          <TextInput label="Tag" placeholder="e.g. momentum, mean-reversion" {...register("tag")} />
           <Textarea label="Notes" minRows={3} {...register("notes")} />
           <Textarea label="Code (optional)" minRows={6} placeholder="# pseudo-code" {...register("code")} />
           <Group justify="flex-end">

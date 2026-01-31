@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import backtrader as bt
 
+from .helpers import price_fmt
+
 
 class RsiCrossStrategy(bt.Strategy):
     """RSI cross strategy.
@@ -39,7 +41,7 @@ class RsiCrossStrategy(bt.Strategy):
         if order.status == order.Completed:
             side = "BUY" if order.isbuy() else "SELL"
             self.log(
-                f"ORDER {side} EXECUTED, price={order.executed.price:.2f}, size={order.executed.size:.6f}, cost={order.executed.value:.2f}, comm={order.executed.comm:.2f}"
+                f"ORDER {side} EXECUTED, price={price_fmt(order.executed.price)}, size={order.executed.size:.6f}, cost={order.executed.value:.2f}, comm={order.executed.comm:.2f}"
             )
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
             self.log(
@@ -55,7 +57,7 @@ class RsiCrossStrategy(bt.Strategy):
         cross_dn = self.cross_dn[0] > 0
 
         if not self.position and cross_up:
-            self.log(f"RSI BUY (cross up) rsi={self.rsi[0]:.2f} close={price:.2f}")
+            self.log(f"RSI BUY (cross up) rsi={self.rsi[0]:.2f} close={price_fmt(price)}")
             if self.p.use_target:
                 self.order = self.order_target_percent(target=float(self.p.invest))
             else:
@@ -65,7 +67,7 @@ class RsiCrossStrategy(bt.Strategy):
                     size = float(self.p.min_size)
                 self.order = self.buy(size=size)
         elif self.position and cross_dn:
-            self.log(f"RSI CLOSE (cross down) rsi={self.rsi[0]:.2f} close={price:.2f}")
+            self.log(f"RSI CLOSE (cross down) rsi={self.rsi[0]:.2f} close={price_fmt(price)}")
             if self.p.use_target:
                 self.order = self.order_target_percent(target=0.0)
             else:

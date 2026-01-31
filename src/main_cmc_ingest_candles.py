@@ -22,6 +22,7 @@ from api.okx_market_data_client import OkxMarketDataClient, OkxApiError
 from config import load_env_file
 from db.candles_repo import CandlesRepo, parse_okx_candle_row
 from db.db_conn import DbConn
+from main_ingest import ensure_and_refresh_mv_multi, DEFAULT_MV_BARS
 
 
 START_TS = datetime(2017, 1, 1, tzinfo=timezone.utc)
@@ -42,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sleep", dest="sleep_sec", type=float, default=0.2, help="Sleep seconds between OKX requests")
     p.add_argument("--use-history-first", action="store_true", help="Start with history endpoint for deeper range")
     p.add_argument("--echo", action="store_true", help="Enable SQLAlchemy engine echo")
+    p.add_argument("--refresh-mv", action="store_true", help="Create/refresh per-instrument MV after ingest")
     return p.parse_args()
 
 
@@ -226,6 +228,12 @@ def main() -> int:
             )
             session.commit()
             print(f"  [{inst_id}] done, upserted {upserted} rows.")
+            if args.refresh_mv:
+                try:
+                    print(f"  [{inst_id}] refreshing MVs for bars={DEFAULT_MV_BARS} ...")
+                    ensure_and_refresh_mv_multi(db, inst_id, DEFAULT_MV_BARS)
+                except Exception as exc:
+                    print(f"  [{inst_id}] MV refresh failed: {exc}")
 
     run_finished = datetime.now(timezone.utc)
     duration = run_finished - run_started

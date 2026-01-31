@@ -36,6 +36,7 @@ export default function StrategiesPage() {
             createMutation.mutateAsync({
               name: vals.name,
               status: vals.status,
+              tag: vals.tag,
               notes: vals.notes,
               code: vals.code,
             })
@@ -53,7 +54,7 @@ export default function StrategiesPage() {
               <Card key={s.id} withBorder radius="md" className="panel">
                 <Text fw={600}>{s.name}</Text>
                 <Text size="sm" c="dimmed">
-                  {s.status.toUpperCase()}
+                  {s.status.toUpperCase()}{s.tag && ` · ${s.tag}`}
                 </Text>
                 {s.notes && (
                   <Text size="sm" mt="xs">

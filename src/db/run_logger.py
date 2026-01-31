@@ -7,7 +7,9 @@ from typing import Any, Dict, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from db.poco.run_log import RunHeader, RunResult, WfoFold
+from db.poco.run_header import RunHeader
+from db.poco.run_result import RunResult
+from db.poco.wfo_fold import WfoFold
 
 
 class RunLogger:

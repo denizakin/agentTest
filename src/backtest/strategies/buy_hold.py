@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import backtrader as bt
 
+from .helpers import price_fmt
+
 
 class BuyHoldStrategy(bt.Strategy):
     """Buy-and-hold strategy.
@@ -32,7 +34,7 @@ class BuyHoldStrategy(bt.Strategy):
         size = (cash * float(self.p.invest)) / price if price else 0.0
         if size < float(self.p.min_size):
             size = float(self.p.min_size)
-        self.log(f"BUY&HOLD: buy size={size:.8f} price={price:.2f}")
+        self.log(f"BUY&HOLD: buy size={size:.8f} price={price_fmt(price)}")
         self.buy(size=size)
         self.ordered = True
 

@@ -25,6 +25,18 @@ class BacktestJobRequest(BaseModel):
     params: Optional[Dict[str, Any]] = None
     start_ts: Optional[str] = None  # ISO timestamp (inclusive)
     end_ts: Optional[str] = None    # ISO timestamp (inclusive)
+    plot: Optional[bool] = None
+    refresh: Optional[bool] = None
+    baseline: Optional[bool] = None
+    parallel_baseline: Optional[bool] = None
+    use_sizer: Optional[bool] = None
+    coc: Optional[bool] = None
+    slip_perc: Optional[float] = None
+    slip_fixed: Optional[float] = None
+    slip_open: Optional[bool] = None
+    cash: Optional[float] = None
+    commission: Optional[float] = None
+    stake: Optional[int] = None
 
 
 class BacktestJobResponse(BaseModel):
@@ -55,6 +67,21 @@ def enqueue_backtest_job(
     if strat is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="strategy not found")
 
+    merged_params: Dict[str, Any] = {
+        "strategy_id": payload.strategy_id,
+        **(payload.params or {}),
+        **({"start_ts": payload.start_ts} if payload.start_ts else {}),
+        **({"end_ts": payload.end_ts} if payload.end_ts else {}),
+    }
+    # ensure top-level flags/values are also stored if provided
+    for key in [
+        "plot", "refresh", "baseline", "parallel_baseline", "use_sizer", "coc",
+        "slip_perc", "slip_fixed", "slip_open", "cash", "commission", "stake"
+    ]:
+        val = getattr(payload, key, None)
+        if val is not None and key not in merged_params:
+            merged_params[key] = val
+
     run = backtests_repo.create(
         session,
         NewBacktest(
@@ -62,12 +89,7 @@ def enqueue_backtest_job(
             instrument_id=payload.instrument_id,
             timeframe=payload.bar,
             strategy_name=strat.name,
-            params={
-                "strategy_id": payload.strategy_id,
-                **(payload.params or {}),
-                **({"start_ts": payload.start_ts} if payload.start_ts else {}),
-                **({"end_ts": payload.end_ts} if payload.end_ts else {}),
-            },
+            params=merged_params,
         ),
     )
     session.commit()

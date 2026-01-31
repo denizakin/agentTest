@@ -15,6 +15,7 @@ ALLOWED_STATUSES: Sequence[str] = ("draft", "prod", "archived")
 class NewStrategy:
     name: str
     status: str = "draft"
+    tag: Optional[str] = None
     notes: Optional[str] = None
     code: Optional[str] = None
 
@@ -29,6 +30,7 @@ class StrategiesRepo:
         obj = Strategy(
             name=new_strategy.name,
             status=new_strategy.status,
+            tag=new_strategy.tag,
             notes=new_strategy.notes,
             code=new_strategy.code,
         )

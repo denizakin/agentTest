@@ -11,6 +11,7 @@ class Strategy(Base):
     strategy_id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(200), nullable=False)
     status = Column(String(20), nullable=False, server_default="draft")
+    tag = Column(String(100), nullable=True)
     notes = Column(Text, nullable=True)
     code = Column(Text, nullable=True)
 
