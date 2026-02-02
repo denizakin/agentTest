@@ -8,6 +8,7 @@ import { getJson, postJson } from "../api/client";
 import type { BacktestSummary, Strategy, CoinSummary, CreateBacktestJobRequest, RunLogItem, RunResultItem, ChartResponse } from "../api/types";
 import { useEffect, useState } from "react";
 import BacktestChart from "../components/BacktestChart";
+import BacktestResults from "../components/BacktestResults";
 import CreateBacktestModal, { type BacktestParams } from "../components/CreateBacktestModal";
 
 export default function BacktestsPage() {
@@ -380,14 +381,24 @@ export default function BacktestsPage() {
         }}
         title={`Chart for run #${selectedRunId}`}
         size="95%"
-        styles={{ body: { height: "85vh", display: "flex", flexDirection: "column" } }}
+        styles={{ body: { height: "85vh", display: "flex", flexDirection: "column", gap: "20px" } }}
       >
         {chartQuery.isLoading && <Text c="dimmed">Loading chart...</Text>}
         {chartQuery.isError && <Text c="red">Failed to load chart</Text>}
         {chartQuery.data && (
-          <div style={{ flex: 1, minHeight: 0 }}>
-            <BacktestChart data={chartQuery.data} />
-          </div>
+          <>
+            {/* Chart Section */}
+            <div style={{ flex: "0 0 50%", minHeight: 0 }}>
+              <BacktestChart data={chartQuery.data} />
+            </div>
+
+            {/* Results Section */}
+            <div style={{ flex: "0 0 auto", overflow: "auto" }}>
+              {selectedRunId && resultsMap[selectedRunId] && (
+                <BacktestResults results={resultsMap[selectedRunId]} />
+              )}
+            </div>
+          </>
         )}
       </Modal>
 
