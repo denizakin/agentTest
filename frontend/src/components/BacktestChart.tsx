@@ -1,15 +1,37 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useImperativeHandle, forwardRef } from "react";
 import type { ChartResponse } from "../api/types";
 
 type Props = { data?: ChartResponse };
 
-export default function BacktestChart({ data }: Props) {
+export type BacktestChartHandle = {
+  zoomToTrade: (entryTime: string, exitTime: string) => void;
+};
+
+const BacktestChart = forwardRef<BacktestChartHandle, Props>(({ data }, ref) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<any>(null);
   const candleRef = useRef<any>(null);
   const volumeRef = useRef<any>(null);
   const signalSeriesRef = useRef<any[]>([]);
   const [ohlcv, setOhlcv] = useState<{ time: string; open: number; high: number; low: number; close: number; volume: number } | null>(null);
+
+  useImperativeHandle(ref, () => ({
+    zoomToTrade: (entryTime: string, exitTime: string) => {
+      if (!chartRef.current) return;
+
+      const entryTimestamp = Math.floor(new Date(entryTime).getTime() / 1000);
+      const exitTimestamp = Math.floor(new Date(exitTime).getTime() / 1000);
+
+      // Add more padding for wider view (50% of range on each side)
+      const range = exitTimestamp - entryTimestamp;
+      const padding = Math.max(range * 0.5, 7200); // At least 2 hours padding
+
+      chartRef.current.timeScale().setVisibleRange({
+        from: entryTimestamp - padding,
+        to: exitTimestamp + padding,
+      });
+    },
+  }));
 
   useEffect(() => {
     let active = true;
@@ -322,4 +344,6 @@ export default function BacktestChart({ data }: Props) {
       )}
     </div>
   );
-}
+});
+
+export default BacktestChart;

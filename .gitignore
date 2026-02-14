@@ -1,5 +1,6 @@
 .venv/
 resources/.env
+resources/plots/
 __pycache__/
 *.pyc
 node_modules/

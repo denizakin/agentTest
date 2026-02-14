@@ -63,6 +63,7 @@ def enqueue_backtest_job(
 
     This is a higher-level job endpoint intended to mirror script-based backtest runs.
     """
+    print(f"[enqueue_backtest_job] Received request: strategy_id={payload.strategy_id}, instrument={payload.instrument_id}, bar={payload.bar}", flush=True)
     strat = strategies_repo.get_by_id(session, payload.strategy_id)
     if strat is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="strategy not found")

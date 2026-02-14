@@ -3,13 +3,15 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
 from db.poco.run_header import RunHeader
 from db.poco.run_result import RunResult
 from db.poco.wfo_fold import WfoFold
+from db.poco.optimization_result import OptimizationResult
+from db.run_trades_repo import RunTradesRepo
 
 
 class RunLogger:
@@ -18,6 +20,7 @@ class RunLogger:
     def __init__(self, plot_dir: Path = Path("resources/plots")) -> None:
         self.plot_dir = plot_dir
         self.plot_dir.mkdir(parents=True, exist_ok=True)
+        self.trades_repo = RunTradesRepo()
 
     def start_run(
         self,
@@ -69,7 +72,17 @@ class RunLogger:
         params: Dict[str, Any],
         metrics: Dict[str, Any],
         plot_path: Optional[str] = None,
+        trades: Optional[List[Dict[str, Any]]] = None,
+        equity: Optional[List[Dict[str, Any]]] = None,
     ) -> int:
+        # Store equity curve in metrics JSON if provided
+        if equity:
+            metrics = {**metrics, "equity": equity}
+            print(f"[log_result] Added {len(equity)} equity points to metrics for label={label}", flush=True)
+        else:
+            print(f"[log_result] No equity data provided for label={label}", flush=True)
+
+        print(f"[log_result] Creating RunResult for label={label}, metrics keys: {list(metrics.keys())}", flush=True)
         result = RunResult(
             run_id=run_id,
             label=label,
@@ -77,9 +90,46 @@ class RunLogger:
             metrics=metrics,
             plot_path=plot_path,
         )
+        print(f"[log_result] RunResult created, adding to session...", flush=True)
         session.add(result)
+        print(f"[log_result] Flushing session...", flush=True)
         session.flush()
+        print(f"[log_result] Successfully saved result for label={label}", flush=True)
+
+        # Save trades to run_trades table if provided
+        if trades and label == "main":  # Only save trades for main strategy, not baseline
+            self.trades_repo.save_trades(session, run_id, trades)
+
         return int(result.id)
+
+    def log_optimization_variant(
+        self,
+        session: Session,
+        run_id: int,
+        variant_params: Dict[str, Any],
+        final_value: Optional[float] = None,
+        sharpe: Optional[float] = None,
+        maxdd: Optional[float] = None,
+        winrate: Optional[float] = None,
+        profit_factor: Optional[float] = None,
+        sqn: Optional[float] = None,
+        total_trades: Optional[int] = None,
+    ) -> int:
+        """Log a single optimization variant result."""
+        opt_result = OptimizationResult(
+            run_id=run_id,
+            variant_params=variant_params,
+            final_value=final_value,
+            sharpe=sharpe,
+            maxdd=maxdd,
+            winrate=winrate,
+            profit_factor=profit_factor,
+            sqn=sqn,
+            total_trades=total_trades,
+        )
+        session.add(opt_result)
+        session.flush()
+        return int(opt_result.id)
 
     def log_wfo_fold(
         self,

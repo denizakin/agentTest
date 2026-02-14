@@ -11,16 +11,19 @@ from datetime import datetime
 from db.backtests_repo import BacktestsRepo, NewBacktest
 from db.run_logs_repo import RunLogsRepo
 from db.run_results_repo import RunResultsRepo
+from db.run_trades_repo import RunTradesRepo
 from db.strategies_repo import StrategiesRepo
 from taskqueue.types import Job, JobQueue
 from web.deps import get_db, get_job_queue
 from sqlalchemy import text
+from backtest.strategies.registry import get_strategy_params
 
 router = APIRouter(prefix="/backtests", tags=["backtests"])
 backtests_repo = BacktestsRepo()
 strategies_repo = StrategiesRepo()
 runlogs_repo = RunLogsRepo()
 runresults_repo = RunResultsRepo()
+runtrades_repo = RunTradesRepo()
 
 
 class BacktestRequest(BaseModel):
@@ -96,10 +99,11 @@ def enqueue_backtest(
     run = backtests_repo.create(
         session,
         NewBacktest(
+            run_type="backtest",
             strategy_id=payload.strategy_id,
             instrument_id=payload.instrument_id,
             timeframe=payload.bar,
-            strategy_name=strat.name,
+            strategy=strat.name,
             params={
                 "strategy_id": payload.strategy_id,
                 **(payload.params or {}),
@@ -179,6 +183,44 @@ def list_backtest_results(run_id: int, session: Session = Depends(get_db)) -> Li
     return [RunResultItem(label=r.label, params=r.params, metrics=r.metrics, plot_path=r.plot_path) for r in rows]
 
 
+class TradeItem(BaseModel):
+    entry_ts: datetime
+    exit_ts: datetime
+    side: str
+    entry_price: float
+    exit_price: float
+    size: float
+    pnl: float
+    pnl_pct: Optional[float] = None
+    mae: Optional[float] = None
+    mfe: Optional[float] = None
+    commission: Optional[float] = None
+
+
+@router.get("/{run_id}/trades", response_model=List[TradeItem])
+def list_backtest_trades(run_id: int, session: Session = Depends(get_db)) -> List[TradeItem]:
+    run = backtests_repo.get(session, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="backtest not found")
+    trades = runtrades_repo.list_trades(session, run_id)
+    return [
+        TradeItem(
+            entry_ts=t.entry_ts,
+            exit_ts=t.exit_ts,
+            side=t.side,
+            entry_price=float(t.entry_price),
+            exit_price=float(t.exit_price),
+            size=float(t.size),
+            pnl=float(t.pnl),
+            pnl_pct=float(t.pnl_pct) if t.pnl_pct else None,
+            mae=float(t.mae) if t.mae else None,
+            mfe=float(t.mfe) if t.mfe else None,
+            commission=float(t.commission) if t.commission else None,
+        )
+        for t in trades
+    ]
+
+
 # ---- Chart endpoint ----
 class ChartCandle(BaseModel):
     time: str  # ISO timestamp
@@ -213,53 +255,6 @@ def _mv_name(inst: str, tf: str) -> str:
     else:
         coin = inst_lower
     return f"mv_candlesticks_{coin}_{tf_norm}"
-
-
-def _parse_signals_from_logs(logs: List[RunLogItem]) -> List[ChartSignal]:
-    import re
-    from datetime import datetime, timezone
-    from zoneinfo import ZoneInfo
-
-    sigs: List[ChartSignal] = []
-    pattern = re.compile(r"ORDER\s+(BUY|SELL)\s+EXECUTED", re.IGNORECASE)
-    price_re = re.compile(r"price=([0-9.+,\\-eE]+)")
-    # Parse datetime from log message (format: "2024-01-01T12:00:00+00:00 - ORDER BUY EXECUTED...")
-    datetime_re = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?)")
-    istanbul_tz = ZoneInfo("Europe/Istanbul")
-
-    for log in logs:
-        m = pattern.search(log.message)
-        if not m:
-            continue
-        side = m.group(1).upper()
-
-        # Try to extract datetime from message
-        signal_time = log.ts.isoformat()  # fallback to log timestamp
-        dt_match = datetime_re.match(log.message)
-        if dt_match:
-            dt_str = dt_match.group(1)
-            # Parse the datetime string
-            try:
-                # Try to parse with timezone info
-                dt = datetime.fromisoformat(dt_str)
-                # If no timezone info (naive datetime), assume Istanbul timezone
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=istanbul_tz)
-                signal_time = dt.isoformat()
-            except Exception:
-                # If parsing fails, keep original string
-                signal_time = dt_str
-
-        price_match = price_re.search(log.message)
-        price = None
-        if price_match:
-            raw = price_match.group(1)
-            try:
-                price = float(raw.replace(",", ""))
-            except Exception:
-                price = None
-        sigs.append(ChartSignal(time=signal_time, side=side, price=price, message=log.message))
-    return sigs
 
 
 @router.get("/{run_id}/chart", response_model=ChartResponse)
@@ -319,8 +314,56 @@ def get_backtest_chart(run_id: int, session: Session = Depends(get_db)) -> Chart
         for ts, o, h, l, c, v in rows
     ]
 
-    logs_raw = runlogs_repo.list_logs(session, run_id, limit=2000, offset=0)
-    logs = [RunLogItem(ts=lr.ts, level=lr.level, message=lr.message) for lr in logs_raw]
-    signals = _parse_signals_from_logs(logs)
+    # Get signals from run_trades table instead of parsing logs
+    # This ensures we get ALL trades, not limited by log size
+    trades = runtrades_repo.list_trades(session, run_id, limit=10000, offset=0)
+
+    signals: List[ChartSignal] = []
+    for trade in trades:
+        # Add entry signal
+        if trade.entry_ts and trade.entry_price:
+            signals.append(ChartSignal(
+                time=trade.entry_ts.astimezone(istanbul_tz).isoformat() if trade.entry_ts.tzinfo else trade.entry_ts.replace(tzinfo=timezone.utc).astimezone(istanbul_tz).isoformat(),
+                side="BUY" if trade.side == "LONG" else "SELL",
+                price=float(trade.entry_price),
+                message=f"Entry {trade.side} @ {trade.entry_price:.2f}"
+            ))
+
+        # Add exit signal
+        if trade.exit_ts and trade.exit_price:
+            signals.append(ChartSignal(
+                time=trade.exit_ts.astimezone(istanbul_tz).isoformat() if trade.exit_ts.tzinfo else trade.exit_ts.replace(tzinfo=timezone.utc).astimezone(istanbul_tz).isoformat(),
+                side="SELL" if trade.side == "LONG" else "BUY",
+                price=float(trade.exit_price),
+                message=f"Exit {trade.side} @ {trade.exit_price:.2f} (PnL: {trade.pnl:.2f})"
+            ))
+
+    # Sort signals by time
+    signals.sort(key=lambda s: s.time)
 
     return ChartResponse(candles=candles, signals=signals)
+
+
+class StrategyParamsResponse(BaseModel):
+    strategy_id: int
+    strategy_name: str
+    params: Dict[str, Any]
+
+
+@router.get("/strategies/{strategy_id}/params", response_model=StrategyParamsResponse)
+def get_strategy_parameters(strategy_id: int, session: Session = Depends(get_db)) -> StrategyParamsResponse:
+    """Get default parameters for a strategy."""
+    strat = strategies_repo.get_by_id(session, strategy_id)
+    if strat is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="strategy not found")
+
+    try:
+        params = get_strategy_params(strat.name)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to get strategy params: {e}")
+
+    return StrategyParamsResponse(
+        strategy_id=strategy_id,
+        strategy_name=strat.name,
+        params=params
+    )

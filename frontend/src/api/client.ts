@@ -27,4 +27,11 @@ export function postJson<T>(path: string, body: unknown): Promise<T> {
   });
 }
 
+export function patchJson<T>(path: string, body: unknown): Promise<T> {
+  return request<T>(path, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
 export { API_URL };

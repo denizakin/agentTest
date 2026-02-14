@@ -1,12 +1,39 @@
 import { useState } from "react";
-import type { RunResultItem } from "../api/types";
+import { useQuery } from "@tanstack/react-query";
+import type { RunResultItem, TradeItem } from "../api/types";
+import EquityChart from "./EquityChart";
+import TradesTable from "./TradesTable";
+import type { BacktestChartHandle } from "./BacktestChart";
 
 type Props = {
   results: RunResultItem[];
+  runId: number;
+  chartRef?: React.RefObject<BacktestChartHandle>;
 };
 
-export default function BacktestResults({ results }: Props) {
+export default function BacktestResults({ results, runId, chartRef }: Props) {
   const [activeTab, setActiveTab] = useState<"metrics" | "trades">("metrics");
+
+  const handleTradeClick = (entryTime: string, exitTime: string) => {
+    // Don't switch tabs, just zoom the chart
+    // Note: Chart is in metrics tab, so if user is in trades tab, they won't see the zoom
+    // But this preserves their current view as requested
+    chartRef?.current?.zoomToTrade(entryTime, exitTime);
+  };
+
+  // Fetch trades data - always fetch for MAE/MFE metrics
+  const tradesQuery = useQuery<TradeItem[]>({
+    queryKey: ["backtest-trades", runId],
+    queryFn: async () => {
+      const res = await fetch(`/api/backtests/${runId}/trades`, {
+        cache: 'no-cache',  // Disable browser cache for trades
+      });
+      if (!res.ok) throw new Error("Failed to fetch trades");
+      return res.json();
+    },
+    staleTime: 0,  // Always refetch when query is used
+    cacheTime: 0,  // Don't keep in cache
+  });
 
   // Find main and baseline results
   const mainResult = results.find((r) => r.label === "main");
@@ -20,6 +47,24 @@ export default function BacktestResults({ results }: Props) {
   const baselineFinal = (baselineMetrics.final as number) || 0;
   const vsBaseline = finalValue - baselineFinal;
   const vsBaselinePct = baselineFinal ? ((vsBaseline / baselineFinal) * 100) : 0;
+
+  // Extract equity curves
+  const equity = (metrics.equity as Array<{ ts: string; value: number }>) || [];
+  const baselineEquity = (baselineMetrics.equity as Array<{ ts: string; value: number }>) || [];
+  const initialCash = equity.length > 0 ? equity[0].value : 10000;
+
+  // Calculate MAE/MFE totals from trades
+  const trades = tradesQuery.data || [];
+  const totalMAE = trades.reduce((sum, t) => sum + (t.mae || 0), 0);
+  const totalMFE = trades.reduce((sum, t) => sum + (t.mfe || 0), 0);
+  const avgMAE = trades.length > 0 ? totalMAE / trades.length : 0;
+  const avgMFE = trades.length > 0 ? totalMFE / trades.length : 0;
+
+  // Debug log
+  console.log("BacktestResults - metrics:", metrics);
+  console.log("BacktestResults - equity points:", equity.length);
+  console.log("BacktestResults - baseline equity points:", baselineEquity.length);
+  console.log("BacktestResults - trades:", trades.length, "totalMAE:", totalMAE, "totalMFE:", totalMFE);
 
   return (
     <div style={{ padding: "20px" }}>
@@ -121,46 +166,65 @@ export default function BacktestResults({ results }: Props) {
               title="SQN"
               value={metrics.sqn ? Number(metrics.sqn).toFixed(2) : "N/A"}
             />
+
+            {/* Total MAE */}
+            <MetricCard
+              title="Total MAE"
+              value={trades.length > 0 ? `$${totalMAE.toFixed(2)}` : "N/A"}
+              subtitle={trades.length > 0 ? `Avg: $${avgMAE.toFixed(2)}` : undefined}
+              color="#f87171"
+            />
+
+            {/* Total MFE */}
+            <MetricCard
+              title="Total MFE"
+              value={trades.length > 0 ? `$${totalMFE.toFixed(2)}` : "N/A"}
+              subtitle={trades.length > 0 ? `Avg: $${avgMFE.toFixed(2)}` : undefined}
+              color="#4ade80"
+            />
           </div>
 
-          {/* Equity Chart Placeholder */}
+          {/* Equity Chart */}
           <div
             style={{
               background: "#1f2937",
               borderRadius: "8px",
               padding: "20px",
               minHeight: "300px",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: "#9ca3af",
             }}
           >
-            <div style={{ textAlign: "center" }}>
-              <div style={{ fontSize: "18px", marginBottom: "10px" }}>Equity Curve</div>
-              <div style={{ fontSize: "14px" }}>Coming soon...</div>
+            <div style={{ fontSize: "16px", marginBottom: "15px", color: "#fff", fontWeight: 500 }}>
+              Equity Curve
             </div>
+            {equity.length > 0 ? (
+              <EquityChart equity={equity} baselineEquity={baselineEquity} initialCash={initialCash} />
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "250px", color: "#9ca3af", gap: "10px" }}>
+                <div>No equity data available</div>
+                <div style={{ fontSize: "12px", color: "#6b7280" }}>
+                  Equity curve data is only available for backtests run after the latest update.
+                  <br />
+                  Please run a new backtest to see the equity curve.
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {activeTab === "trades" && (
-        <div
-          style={{
-            background: "#1f2937",
-            borderRadius: "8px",
-            padding: "20px",
-            minHeight: "400px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "#9ca3af",
-          }}
-        >
-          <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: "18px", marginBottom: "10px" }}>Trade List</div>
-            <div style={{ fontSize: "14px" }}>Coming soon...</div>
-          </div>
+        <div>
+          {tradesQuery.isLoading && (
+            <div style={{ textAlign: "center", padding: "40px", color: "#9ca3af" }}>
+              Loading trades...
+            </div>
+          )}
+          {tradesQuery.isError && (
+            <div style={{ textAlign: "center", padding: "40px", color: "#f87171" }}>
+              Failed to load trades
+            </div>
+          )}
+          {tradesQuery.data && <TradesTable trades={tradesQuery.data} onTradeClick={handleTradeClick} />}
         </div>
       )}
     </div>

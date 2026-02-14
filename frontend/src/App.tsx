@@ -5,7 +5,7 @@ import SidebarNav from "./components/SidebarNav";
 import CoinsPage from "./pages/CoinsPage";
 import StrategiesPage from "./pages/StrategiesPage";
 import BacktestsPage from "./pages/BacktestsPage";
-import OptimizationPage from "./pages/OptimizationPage";
+import OptimizationsPage from "./pages/OptimizationsPage";
 import WfAnalysisPage from "./pages/WfAnalysisPage";
 import ActivityPage from "./pages/ActivityPage";
 
@@ -55,7 +55,7 @@ export default function App() {
         <Route path="/coins" element={<CoinsPage />} />
         <Route path="/strategies" element={<StrategiesPage />} />
         <Route path="/backtests" element={<BacktestsPage />} />
-        <Route path="/optimization" element={<OptimizationPage />} />
+        <Route path="/optimizations" element={<OptimizationsPage />} />
         <Route path="/wf" element={<WfAnalysisPage />} />
         <Route path="/activity" element={<ActivityPage />} />
       </Route>

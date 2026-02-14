@@ -1,6 +1,7 @@
-import { Button, Checkbox, Group, Modal, NumberInput, Select, Stack } from "@mantine/core";
+import { Button, Checkbox, Group, Modal, NumberInput, Select, Stack, TextInput, MultiSelect } from "@mantine/core";
 import { DateTimePicker } from "@mantine/dates";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import type { Strategy, CoinSummary } from "../api/types";
 
 type Props = {
@@ -15,6 +16,7 @@ type Props = {
 export type BacktestParams = {
   strategy_id: number;
   instrument_id: string;
+  instrument_ids?: string[]; // For multi-instrument backtests
   bar: string;
   start_ts?: string;
   end_ts?: string;
@@ -30,12 +32,13 @@ export type BacktestParams = {
   slip_open: boolean;
   refresh: boolean;
   plot: boolean;
+  params?: Record<string, any>;
 };
 
 export default function CreateBacktestModal({ opened, onClose, onSubmit, strategies, coins, isLoading }: Props) {
   const barOptions = ["1m", "5m", "15m", "1h", "4h", "1d", "1w", "1mo"];
 
-  const [instrumentId, setInstrumentId] = useState("");
+  const [instrumentIds, setInstrumentIds] = useState<string[]>([]);
   const [bar, setBar] = useState("1h");
   const [strategyId, setStrategyId] = useState<string | null>(null);
   const [startDt, setStartDt] = useState<Date | null>(null);
@@ -52,13 +55,41 @@ export default function CreateBacktestModal({ opened, onClose, onSubmit, strateg
   const [slipOpen, setSlipOpen] = useState(true);
   const [refresh, setRefresh] = useState(false);
   const [plot, setPlot] = useState(true);
+  const [strategyParams, setStrategyParams] = useState<Record<string, any>>({});
+
+  // Fetch strategy parameters when strategy changes
+  const { data: paramsData } = useQuery({
+    queryKey: ["strategy-params", strategyId],
+    queryFn: async () => {
+      if (!strategyId) return null;
+      const res = await fetch(`/api/backtests/strategies/${strategyId}/params`);
+      if (!res.ok) {
+        // If strategy params are not available, just return null instead of throwing
+        console.warn(`Strategy params not available for strategy ${strategyId}`);
+        return null;
+      }
+      return res.json();
+    },
+    enabled: !!strategyId,
+    retry: false, // Don't retry if params are not available
+  });
+
+  // Update strategy params state when data loads
+  useEffect(() => {
+    if (paramsData?.params) {
+      setStrategyParams(paramsData.params);
+    } else {
+      setStrategyParams({});
+    }
+  }, [paramsData]);
 
   const handleSubmit = () => {
-    if (!strategyId || !instrumentId || !bar) return;
+    if (!strategyId || instrumentIds.length === 0 || !bar || isLoading) return;
 
     onSubmit({
       strategy_id: Number(strategyId),
-      instrument_id: instrumentId,
+      instrument_id: instrumentIds[0], // For backward compatibility
+      instrument_ids: instrumentIds,
       bar,
       start_ts: startDt?.toISOString(),
       end_ts: endDt?.toISOString(),
@@ -74,8 +105,13 @@ export default function CreateBacktestModal({ opened, onClose, onSubmit, strateg
       slip_open: slipOpen,
       refresh,
       plot,
+      params: strategyParams,
     });
-    onClose();
+    // Don't close immediately - let parent handle it after success
+  };
+
+  const updateStrategyParam = (key: string, value: any) => {
+    setStrategyParams((prev) => ({ ...prev, [key]: value }));
   };
 
   return (
@@ -92,12 +128,12 @@ export default function CreateBacktestModal({ opened, onClose, onSubmit, strateg
             nothingFoundMessage="No strategies"
             required
           />
-          <Select
-            label="Instrument"
-            placeholder="Select instrument"
+          <MultiSelect
+            label="Instruments"
+            placeholder="Select one or more instruments"
             data={coins.map((c) => ({ value: c.instrument_id, label: c.instrument_id }))}
-            value={instrumentId}
-            onChange={(v) => setInstrumentId(v || "")}
+            value={instrumentIds}
+            onChange={setInstrumentIds}
             searchable
             nothingFoundMessage="No instruments"
             required
@@ -138,6 +174,53 @@ export default function CreateBacktestModal({ opened, onClose, onSubmit, strateg
           <NumberInput label="Slip % (fraction)" value={slipPerc} onChange={(v) => setSlipPerc(v === "" ? undefined : Number(v))} min={0} step={0.0001} decimalScale={6} />
           <NumberInput label="Slip fixed" value={slipFixed} onChange={(v) => setSlipFixed(v === "" ? undefined : Number(v))} min={0} step={0.01} />
         </Group>
+
+        {/* Strategy Parameters Section */}
+        {strategyId && Object.keys(strategyParams).length > 0 && (
+          <div style={{ borderTop: "1px solid #dee2e6", paddingTop: "12px", marginTop: "8px" }}>
+            <div style={{ fontSize: "14px", fontWeight: 600, marginBottom: "12px", color: "#495057" }}>
+              Strategy Parameters
+            </div>
+            <Group grow>
+              {Object.entries(strategyParams).map(([key, defaultValue]) => {
+                const value = strategyParams[key];
+
+                // Determine input type based on value type
+                if (typeof defaultValue === "boolean") {
+                  return (
+                    <Checkbox
+                      key={key}
+                      label={key}
+                      checked={value}
+                      onChange={(e) => updateStrategyParam(key, e.currentTarget.checked)}
+                    />
+                  );
+                } else if (typeof defaultValue === "number") {
+                  return (
+                    <NumberInput
+                      key={key}
+                      label={key}
+                      value={value}
+                      onChange={(v) => updateStrategyParam(key, v === "" ? defaultValue : Number(v))}
+                      step={Number.isInteger(defaultValue) ? 1 : 0.01}
+                      decimalScale={Number.isInteger(defaultValue) ? 0 : 4}
+                    />
+                  );
+                } else {
+                  return (
+                    <TextInput
+                      key={key}
+                      label={key}
+                      value={String(value)}
+                      onChange={(e) => updateStrategyParam(key, e.currentTarget.value)}
+                    />
+                  );
+                }
+              })}
+            </Group>
+          </div>
+        )}
+
         <Group>
           <Checkbox label="Use sizer" checked={useSizer} onChange={(e) => setUseSizer(e.currentTarget.checked)} />
           <Checkbox label="COC" checked={coc} onChange={(e) => setCoc(e.currentTarget.checked)} />
@@ -151,8 +234,8 @@ export default function CreateBacktestModal({ opened, onClose, onSubmit, strateg
           <Button variant="light" onClick={onClose}>
             Cancel
           </Button>
-          <Button onClick={handleSubmit} disabled={!strategyId || !instrumentId || !bar} loading={isLoading}>
-            Start Backtest
+          <Button onClick={handleSubmit} disabled={!strategyId || instrumentIds.length === 0 || !bar || isLoading} loading={isLoading}>
+            Start Backtest{instrumentIds.length > 1 ? "s" : ""}
           </Button>
         </Group>
       </Stack>

@@ -6,8 +6,8 @@ import { IconRefresh } from "@tabler/icons-react";
 import JobProgress from "../components/JobProgress";
 import { getJson, postJson } from "../api/client";
 import type { BacktestSummary, Strategy, CoinSummary, CreateBacktestJobRequest, RunLogItem, RunResultItem, ChartResponse } from "../api/types";
-import { useEffect, useState } from "react";
-import BacktestChart from "../components/BacktestChart";
+import { useEffect, useState, useRef } from "react";
+import BacktestChart, { type BacktestChartHandle } from "../components/BacktestChart";
 import BacktestResults from "../components/BacktestResults";
 import CreateBacktestModal, { type BacktestParams } from "../components/CreateBacktestModal";
 
@@ -17,6 +17,7 @@ export default function BacktestsPage() {
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [viewMode, setViewMode] = useState<"chart" | "logs" | null>(null);
   const [resultsMap, setResultsMap] = useState<Record<number, RunResultItem[]>>({});
+  const chartRef = useRef<BacktestChartHandle>(null);
 
   // Filter states
   const [filterStrategy, setFilterStrategy] = useState<string | null>(null);
@@ -46,6 +47,7 @@ export default function BacktestsPage() {
     onSuccess: () => {
       notifications.show({ title: "Backtest enqueued", message: "Job queued", color: "green" });
       qc.invalidateQueries({ queryKey: ["backtests"] });
+      setCreateModalOpened(false);  // Close modal after successful submission
     },
     onError: (err: Error) => {
       notifications.show({ title: "Backtest enqueue failed", message: err.message, color: "red" });
@@ -165,28 +167,61 @@ export default function BacktestsPage() {
     return path;
   };
 
-  const handleCreateBacktest = (params: BacktestParams) => {
-    createMutation.mutate({
-      strategy_id: params.strategy_id,
-      instrument_id: params.instrument_id,
-      bar: params.bar,
-      params: {
-        ...(params.start_ts ? { start_ts: params.start_ts } : {}),
-        ...(params.end_ts ? { end_ts: params.end_ts } : {}),
-        ...(params.cash !== undefined ? { cash: params.cash } : {}),
-        ...(params.commission !== undefined ? { commission: params.commission } : {}),
-        ...(params.stake !== undefined ? { stake: params.stake } : {}),
-        use_sizer: params.use_sizer,
-        coc: params.coc,
-        baseline: params.baseline,
-        parallel_baseline: params.parallel_baseline,
-        slip_perc: params.slip_perc,
-        slip_fixed: params.slip_fixed,
-        slip_open: params.slip_open,
-        refresh: params.refresh,
-        plot: params.plot,
-      },
-    });
+  const handleCreateBacktest = async (params: BacktestParams) => {
+    const instruments = params.instrument_ids || [params.instrument_id];
+
+    // Create a backtest job for each selected instrument
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const instrumentId of instruments) {
+      try {
+        await createMutation.mutateAsync({
+          strategy_id: params.strategy_id,
+          instrument_id: instrumentId,
+          bar: params.bar,
+          params: {
+            ...(params.start_ts ? { start_ts: params.start_ts } : {}),
+            ...(params.end_ts ? { end_ts: params.end_ts } : {}),
+            ...(params.cash !== undefined ? { cash: params.cash } : {}),
+            ...(params.commission !== undefined ? { commission: params.commission } : {}),
+            ...(params.stake !== undefined ? { stake: params.stake } : {}),
+            use_sizer: params.use_sizer,
+            coc: params.coc,
+            baseline: params.baseline,
+            parallel_baseline: params.parallel_baseline,
+            slip_perc: params.slip_perc,
+            slip_fixed: params.slip_fixed,
+            slip_open: params.slip_open,
+            refresh: params.refresh,
+            plot: params.plot,
+            // Include strategy-specific parameters
+            ...(params.params || {}),
+          },
+        });
+        successCount++;
+      } catch (err) {
+        failCount++;
+        console.error(`Failed to enqueue backtest for ${instrumentId}:`, err);
+      }
+    }
+
+    // Show summary notification
+    if (successCount > 0) {
+      notifications.show({
+        title: "Backtests enqueued",
+        message: `${successCount} backtest${successCount > 1 ? "s" : ""} queued successfully${failCount > 0 ? `, ${failCount} failed` : ""}`,
+        color: failCount > 0 ? "yellow" : "green",
+      });
+      qc.invalidateQueries({ queryKey: ["backtests"] });
+      setCreateModalOpened(false);
+    } else {
+      notifications.show({
+        title: "Backtest enqueue failed",
+        message: `All ${failCount} backtest${failCount > 1 ? "s" : ""} failed to enqueue`,
+        color: "red",
+      });
+    }
   };
 
   return (
@@ -389,13 +424,13 @@ export default function BacktestsPage() {
           <>
             {/* Chart Section */}
             <div style={{ flex: "0 0 50%", minHeight: 0 }}>
-              <BacktestChart data={chartQuery.data} />
+              <BacktestChart ref={chartRef} data={chartQuery.data} />
             </div>
 
             {/* Results Section */}
             <div style={{ flex: "0 0 auto", overflow: "auto" }}>
               {selectedRunId && resultsMap[selectedRunId] && (
-                <BacktestResults results={resultsMap[selectedRunId]} />
+                <BacktestResults results={resultsMap[selectedRunId]} runId={selectedRunId} chartRef={chartRef} />
               )}
             </div>
           </>

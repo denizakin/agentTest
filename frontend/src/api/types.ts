@@ -91,3 +91,84 @@ export type ChartResponse = {
   candles: ChartCandle[];
   signals: ChartSignal[];
 };
+
+export type TradeItem = {
+  entry_ts: string;
+  exit_ts: string;
+  side: string;
+  entry_price: number;
+  exit_price: number;
+  size: number;
+  pnl: number;
+  pnl_pct?: number | null;
+  mae?: number | null;
+  mfe?: number | null;
+  commission?: number | null;
+};
+
+export type ParamRange = {
+  start: number;
+  stop: number;
+  step: number;
+};
+
+export type OptimizationSummary = {
+  run_id: number;
+  job_id: string;
+  strategy_id: number;
+  strategy_name?: string | null;
+  instrument_id: string;
+  bar: string;
+  status: string;
+  submitted_at: string;
+  progress: number;
+  error?: string | null;
+  total_variants?: number | null;
+  best_final_value?: number | null;
+  best_params?: Record<string, unknown> | null;
+};
+
+export type OptimizationVariant = {
+  id: number;
+  variant_params: Record<string, unknown>;
+  final_value?: number | null;
+  sharpe?: number | null;
+  maxdd?: number | null;
+  winrate?: number | null;
+  profit_factor?: number | null;
+  sqn?: number | null;
+  total_trades?: number | null;
+};
+
+export type OptimizationDetail = {
+  run_id: number;
+  strategy_id: number;
+  strategy_name: string;
+  instrument_id: string;
+  bar: string;
+  status: string;
+  submitted_at: string;
+  ended_at?: string | null;
+  progress: number;
+  error?: string | null;
+  param_ranges: Record<string, ParamRange>;
+  constraint?: string | null;
+  total_variants: number;
+  variants: OptimizationVariant[];
+};
+
+export type CreateOptimizationRequest = {
+  strategy_id: number;
+  instrument_id: string;
+  bar: string;
+  param_ranges: Record<string, ParamRange>;
+  constraint?: string;
+  start_ts?: string;
+  end_ts?: string;
+  cash?: number;
+  commission?: number;
+  slip_perc?: number;
+  slip_fixed?: number;
+  slip_open?: boolean;
+  maxcpus?: number;
+};

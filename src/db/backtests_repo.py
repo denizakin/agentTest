@@ -12,11 +12,18 @@ from db.poco.run_header import RunHeader
 
 @dataclass(frozen=True)
 class NewBacktest:
-    strategy_id: int
-    instrument_id: str
-    timeframe: str
-    strategy_name: str
+    run_type: str = "backtest"  # backtest or optimize
+    strategy_id: int = 0
+    instrument_id: str = ""
+    timeframe: str = ""
+    strategy: str = ""
     params: Optional[Dict] = None
+    cash: Optional[float] = None
+    commission: Optional[float] = None
+    slip_perc: Optional[float] = None
+    slip_fixed: Optional[float] = None
+    slip_open: Optional[bool] = None
+    baseline: Optional[bool] = None
     notes: Optional[str] = None
 
 
@@ -25,12 +32,18 @@ class BacktestsRepo:
 
     def create(self, session: Session, new_bt: NewBacktest) -> RunHeader:
         run = RunHeader(
-            run_type="backtest",
+            run_type=new_bt.run_type,
             strategy_id=new_bt.strategy_id,
             instrument_id=new_bt.instrument_id,
             timeframe=new_bt.timeframe,
-            strategy=new_bt.strategy_name,
+            strategy=new_bt.strategy,
             params=new_bt.params,
+            cash=new_bt.cash,
+            commission=new_bt.commission,
+            slip_perc=new_bt.slip_perc,
+            slip_fixed=new_bt.slip_fixed,
+            slip_open=new_bt.slip_open,
+            baseline=new_bt.baseline,
             started_at=datetime.now(tz=timezone.utc),
             notes=new_bt.notes,
             status="queued",
@@ -40,10 +53,10 @@ class BacktestsRepo:
         session.flush()
         return run
 
-    def list_recent(self, session: Session, limit: int = 50, offset: int = 0) -> List[RunHeader]:
+    def list_recent(self, session: Session, limit: int = 50, offset: int = 0, run_type: str = "backtest") -> List[RunHeader]:
         stmt = (
             select(RunHeader)
-            .where(RunHeader.run_type == "backtest")
+            .where(RunHeader.run_type == run_type)
             .order_by(RunHeader.started_at.desc())
             .offset(offset)
             .limit(limit)
@@ -53,17 +66,20 @@ class BacktestsRepo:
 
     def fetch_next_queued(self, session: Session) -> Optional[RunHeader]:
         """
-        Fetch the next queued backtest row using SKIP LOCKED to avoid contention.
+        Fetch the next queued backtest/optimize row using SKIP LOCKED to avoid contention.
         """
         stmt = (
             select(RunHeader)
-            .where(RunHeader.run_type == "backtest")
+            .where(RunHeader.run_type.in_(["backtest", "optimize"]))
             .where(RunHeader.status == "queued")
             .order_by(RunHeader.started_at.asc())
             .with_for_update(skip_locked=True)
             .limit(1)
         )
         return session.scalars(stmt).first()
+
+    def get_by_id(self, session: Session, run_id: int) -> Optional[RunHeader]:
+        return session.get(RunHeader, run_id)
 
     def get(self, session: Session, run_id: int) -> Optional[RunHeader]:
         return session.get(RunHeader, run_id)

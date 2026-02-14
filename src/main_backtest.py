@@ -24,6 +24,8 @@ from config import load_env_file
 from db.db_conn import DbConn
 from db.run_logger import RunLogger
 from backtest.strategies.registry import get_strategy, available_strategies
+from backtest.analyzers.trades_list import TradesList
+from backtest.analyzers.equity_curve import EquityCurve
 
 
 def _parse_time(value: Optional[str]) -> Optional[datetime]:
@@ -102,9 +104,9 @@ def _fetch_df(db: DbConn, inst: str, tf: str, since: Optional[datetime], until: 
         return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])  # empty
 
     df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
-    # Convert UTC timestamps to Istanbul timezone, then make naive for Backtrader
-    # Database stores candles in UTC, but we need to display them in Istanbul time
-    df["ts"] = pd.to_datetime(df["ts"], utc=True).dt.tz_convert("Europe/Istanbul").dt.tz_localize(None)
+    # Database stores candles in UTC, convert to pandas datetime with UTC timezone, then make naive
+    # Backtrader requires naive datetimes, but we keep them in UTC timezone reference
+    df["ts"] = pd.to_datetime(df["ts"], utc=True).dt.tz_localize(None)
 
     # Ensure numeric columns are float (handle Decimal/str -> float); drop rows with NaNs after coercion
     for col in ("open", "high", "low", "close", "volume"):
@@ -181,7 +183,7 @@ def run_once(df_in: pd.DataFrame, strat_name: str, params: Dict[str, Any], *,
              do_plot: bool = False, verbose: bool = True,
              progress_cb: Optional[Callable[[float], None]] = None,
              prog_start: Optional[datetime] = None,
-             prog_end: Optional[datetime] = None) -> Tuple[float, Dict[str, Any], object]:
+             prog_end: Optional[datetime] = None) -> Tuple[float, Dict[str, Any], object, List[Dict[str, Any]], List[Dict[str, Any]]]:
     cerebro = bt.Cerebro()
     datafeed = bt.feeds.PandasData(
         dataname=df_in,
@@ -238,6 +240,8 @@ def run_once(df_in: pd.DataFrame, strat_name: str, params: Dict[str, Any], *,
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
     cerebro.addanalyzer(bt.analyzers.SQN, _name="sqn")
     cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
+    cerebro.addanalyzer(TradesList, _name="trades_list")
+    cerebro.addanalyzer(EquityCurve, _name="equity_curve")
 
     start_val = cerebro.broker.getvalue()
     if verbose:
@@ -253,6 +257,8 @@ def run_once(df_in: pd.DataFrame, strat_name: str, params: Dict[str, Any], *,
         dd = results[0].analyzers.drawdown.get_analysis()  # type: ignore[attr-defined]
         sq = results[0].analyzers.sqn.get_analysis()  # type: ignore[attr-defined]
         ta = results[0].analyzers.trades.get_analysis()  # type: ignore[attr-defined]
+        trades_list_data = results[0].analyzers.trades_list.get_analysis()  # type: ignore[attr-defined]
+        equity_curve_data = results[0].analyzers.equity_curve.get_analysis()  # type: ignore[attr-defined]
 
         maxdd = (dd.get('max') or {}).get('drawdown') if isinstance(dd, dict) else None
 
@@ -308,7 +314,15 @@ def run_once(df_in: pd.DataFrame, strat_name: str, params: Dict[str, Any], *,
         except Exception as exc:
             print(f"Plotting failed: {exc}")
     metrics["final"] = float(end_val)
-    return float(end_val), metrics, figs
+
+    # Extract trades and equity data
+    trades_list = trades_list_data.get("trades", []) if isinstance(trades_list_data, dict) else []
+    equity_curve = equity_curve_data.get("equity", []) if isinstance(equity_curve_data, dict) else []
+
+    print(f"[DEBUG run_once] trades_list_data type: {type(trades_list_data)}, trades count: {len(trades_list)}")
+    print(f"[DEBUG run_once] equity_curve_data type: {type(equity_curve_data)}, equity count: {len(equity_curve)}")
+
+    return float(end_val), metrics, figs, trades_list, equity_curve
 
 
 def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str], cash: float, commission: float,
@@ -318,7 +332,8 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
                  slip_perc: float = 0.0, slip_fixed: float = 0.0, slip_open: bool = True,
                  log_to_db: bool = True,
                  results_out: Optional[dict] = None,
-                 on_progress: Optional[Callable[[float], None]] = None) -> int:
+                 on_progress: Optional[Callable[[float], None]] = None,
+                 run_id: Optional[int] = None) -> int:
     load_env_file()
     db = DbConn()
     logger = RunLogger(Path("resources/plots")) if log_to_db else None
@@ -347,66 +362,51 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
     figs_main = None
 
     if log_to_db and logger is not None:
-        with db.session_scope() as s:
-            run_id = logger.start_run(
-                session=s,
-                run_type="backtest",
-                instrument_id=inst,
-                timeframe=tf,
-                strategy=strategy_name,
-                params=strat_params,
-                cash=cash,
-                commission=commission,
-                slip_perc=slip_perc,
-                slip_fixed=slip_fixed,
-                slip_open=slip_open,
-                baseline=baseline,
-            )
+        # Only create a new run_header if run_id not provided (e.g., CLI usage)
+        # When called from worker, run_id is already created by jobs.py
+        if run_id is None:
+            with db.session_scope() as s:
+                run_id = logger.start_run(
+                    session=s,
+                    run_type="backtest",
+                    instrument_id=inst,
+                    timeframe=tf,
+                    strategy=strategy_name,
+                    params=strat_params,
+                    cash=cash,
+                    commission=commission,
+                    slip_perc=slip_perc,
+                    slip_fixed=slip_fixed,
+                    slip_open=slip_open,
+                    baseline=baseline,
+                )
+
         # Baseline in parallel: start baseline first, then run main, then await baseline
-            if baseline and parallel_baseline:
-                try:
-                    from concurrent.futures import ProcessPoolExecutor
-                    with ProcessPoolExecutor(max_workers=2) as ex:
-                        fut = ex.submit(
-                            run_once, df, "buyhold", {},
-                            cash=cash, commission=commission, coc=coc,
-                            use_sizer=use_sizer, stake=stake,
-                            slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
-                            do_plot=False, verbose=False,
-                        )
-                        end_main, metrics_main, figs_main = run_once(
-                            df, strategy_name, strat_params,
-                            cash=cash, commission=commission, coc=coc,
-                            use_sizer=use_sizer, stake=stake,
-                            slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
-                            do_plot=bool(plot), verbose=True,
-                            progress_cb=on_progress,
-                            prog_start=df["ts"].iloc[0],
-                            prog_end=df["ts"].iloc[-1],
-                        )
-                        end_bh, metrics_bh, _ = fut.result()
-                except Exception as exc:
-                    print(f"Parallel baseline failed: {exc}; falling back to sequential.")
-                    end_main, metrics_main, figs_main = run_once(
-                        df, strategy_name, strat_params,
-                        cash=cash, commission=commission, coc=coc,
-                        use_sizer=use_sizer, stake=stake,
-                        slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
-                        do_plot=bool(plot),
-                        progress_cb=on_progress,
-                        prog_start=df["ts"].iloc[0],
-                        prog_end=df["ts"].iloc[-1],
-                    )
-                    end_bh, metrics_bh, _ = run_once(
-                        df, "buyhold", {},
+        if baseline and parallel_baseline:
+            try:
+                from concurrent.futures import ProcessPoolExecutor
+                with ProcessPoolExecutor(max_workers=2) as ex:
+                    fut = ex.submit(
+                        run_once, df, "buyhold", {},
                         cash=cash, commission=commission, coc=coc,
                         use_sizer=use_sizer, stake=stake,
                         slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
                         do_plot=False, verbose=False,
                     )
-            else:
-                # Sequential path or no baseline requested
-                end_main, metrics_main, figs_main = run_once(
+                    end_main, metrics_main, figs_main, trades_main, equity_main = run_once(
+                        df, strategy_name, strat_params,
+                        cash=cash, commission=commission, coc=coc,
+                        use_sizer=use_sizer, stake=stake,
+                        slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+                        do_plot=bool(plot), verbose=True,
+                        progress_cb=on_progress,
+                        prog_start=df["ts"].iloc[0],
+                        prog_end=df["ts"].iloc[-1],
+                    )
+                    end_bh, metrics_bh, _, _, equity_bh = fut.result()
+            except Exception as exc:
+                print(f"Parallel baseline failed: {exc}; falling back to sequential.")
+                end_main, metrics_main, figs_main, trades_main, equity_main = run_once(
                     df, strategy_name, strat_params,
                     cash=cash, commission=commission, coc=coc,
                     use_sizer=use_sizer, stake=stake,
@@ -416,18 +416,39 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
                     prog_start=df["ts"].iloc[0],
                     prog_end=df["ts"].iloc[-1],
                 )
-                if baseline:
-                    end_bh, metrics_bh, _ = run_once(
-                        df, "buyhold", {},
-                        cash=cash, commission=commission, coc=coc,
-                        use_sizer=use_sizer, stake=stake,
-                        slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
-                        do_plot=False, verbose=False,
-                    )
+                end_bh, metrics_bh, _, _, equity_bh = run_once(
+                    df, "buyhold", {},
+                    cash=cash, commission=commission, coc=coc,
+                    use_sizer=use_sizer, stake=stake,
+                    slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+                    do_plot=False, verbose=False,
+                )
+        else:
+            # Sequential path or no baseline requested
+            end_main, metrics_main, figs_main, trades_main, equity_main = run_once(
+                df, strategy_name, strat_params,
+                cash=cash, commission=commission, coc=coc,
+                use_sizer=use_sizer, stake=stake,
+                slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+                do_plot=bool(plot),
+                progress_cb=on_progress,
+                prog_start=df["ts"].iloc[0],
+                prog_end=df["ts"].iloc[-1],
+            )
+            if baseline:
+                end_bh, metrics_bh, _, _, equity_bh = run_once(
+                    df, "buyhold", {},
+                    cash=cash, commission=commission, coc=coc,
+                    use_sizer=use_sizer, stake=stake,
+                    slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+                    do_plot=False, verbose=False,
+                )
 
-            if plot:
-                plot_main = logger.save_plot(figs_main, run_id, "main")
+        if plot:
+            plot_main = logger.save_plot(figs_main, run_id, "main")
 
+        # Save results to database
+        with db.session_scope() as s:
             logger.log_result(
                 session=s,
                 run_id=run_id,
@@ -435,6 +456,8 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
                 params=strat_params,
                 metrics=metrics_main,
                 plot_path=plot_main,
+                trades=trades_main,
+                equity=equity_main,
             )
             if baseline:
                 logger.log_result(
@@ -444,12 +467,13 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
                     params={},
                     metrics=metrics_bh,
                     plot_path=None,
+                    equity=equity_bh,
                 )
             logger.complete_run(s, run_id)
     else:
         # No DB logging; run sequentially and ignore metrics persistence
         plot_main: Optional[str] = None
-        end_main, metrics_main, figs_main = run_once(
+        end_main, metrics_main, figs_main, trades_main, equity_main = run_once(
             df, strategy_name, strat_params,
             cash=cash, commission=commission, coc=coc,
             use_sizer=use_sizer, stake=stake,
@@ -461,7 +485,7 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
         )
         end_bh, metrics_bh = 0.0, {}
         if baseline:
-            end_bh, metrics_bh, _ = run_once(
+            end_bh, metrics_bh, _, _, equity_bh = run_once(
                 df, "buyhold", {},
                 cash=cash, commission=commission, coc=coc,
                 use_sizer=use_sizer, stake=stake,
@@ -831,6 +855,13 @@ def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str],
             except Exception:
                 final_value = float('nan')
 
+            sqn_val = None
+            try:
+                sqn_an = strat.analyzers.sqn.get_analysis()
+                sqn_val = sqn_an.get('sqn') if isinstance(sqn_an, dict) else None
+            except Exception:
+                pass
+
             row = {
                 'params': p_dict,
                 'final': final_value,
@@ -838,15 +869,21 @@ def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str],
                 'maxdd': maxdd,
                 'winrate': win_rate,
                 'pf': profit_factor,
+                'sqn': sqn_val,
+                'total_trades': total_closed,
             }
             rows.append(row)
-            logger.log_result(
+            logger.log_optimization_variant(
                 session=s,
                 run_id=run_id,
-                label="opt_variant",
-                params=p_dict,
-                metrics=row,
-                plot_path=None,
+                variant_params=p_dict,
+                final_value=final_value,
+                sharpe=s_an.get('sharperatio') if isinstance(s_an, dict) else None,
+                maxdd=maxdd,
+                winrate=win_rate,
+                profit_factor=profit_factor,
+                sqn=sqn_val,
+                total_trades=total_closed,
             )
 
         logger.complete_run(s, run_id)
@@ -1041,7 +1078,7 @@ def run_wfo(inst: str, tf: str, since: Optional[str], until: Optional[str], cash
                 continue
 
             # Run best params on test set (single run, no plotting)
-            test_end_val, test_metrics, _ = run_once(
+            test_end_val, test_metrics, _, _, _ = run_once(
                 test_df, strategy_name, best["params"],
                 cash=cash, commission=commission, coc=True,  # keep coc default true for consistency
                 use_sizer=False, stake=1,

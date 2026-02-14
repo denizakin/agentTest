@@ -19,7 +19,8 @@ from db.db_conn import DbConn
 from db.run_logs_repo import RunLogsRepo
 from db.run_results_repo import RunResultsRepo
 from db.strategies_repo import StrategiesRepo
-from main_backtest import run_backtest
+from db.optimization_results_repo import OptimizationResultsRepo
+from main_backtest import run_backtest, run_optimize
 
 
 POLL_SECONDS = float(os.getenv("WORKER_POLL_SECONDS", "1.0"))
@@ -256,9 +257,10 @@ def process_backtest(run_id: int, payload: dict, repo: BacktestsRepo, db: DbConn
             slip_perc=slip_perc,
             slip_fixed=slip_fixed,
             slip_open=slip_open,
-            log_to_db=False,
+            log_to_db=True,
             results_out=results_out,
             on_progress=on_progress,
+            run_id=run_id,
         )
 
     with db.session_scope() as session:
@@ -282,6 +284,86 @@ def process_backtest(run_id: int, payload: dict, repo: BacktestsRepo, db: DbConn
     # TODO: store metrics in run_results
 
 
+def process_optimization(run_id: int, payload: dict, repo: BacktestsRepo, db: DbConn) -> None:
+    logger = get_logger(db)
+    def log_msg(level: str, msg: str) -> None:
+        logger.log(getattr(logging, level, logging.INFO), msg, extra={"run_id": run_id})
+
+    with db.session_scope() as session:
+        try:
+            repo.update_status(session, run_id, status="running", progress=5)
+        except Exception as exc:
+            session.rollback()
+            log_msg("ERROR", f"Failed to mark running: {exc}")
+            raise
+    log_msg("INFO", f"Optimization started (run_id={run_id})")
+
+    instrument_id = payload.get("instrument_id")
+    bar = payload.get("bar")
+    strategy = payload.get("strategy")
+    grid_spec = payload.get("grid_spec")
+    constraint = payload.get("constraint", "")
+    since = payload.get("since")
+    until = payload.get("until")
+    cash = float(payload.get("cash", 10000))
+    commission = float(payload.get("commission", 0.001))
+    slip_perc = float(payload.get("slip_perc", 0.0))
+    slip_fixed = float(payload.get("slip_fixed", 0.0))
+    slip_open = bool(payload.get("slip_open", True))
+    maxcpus = int(payload.get("maxcpus", 1))
+
+    if not instrument_id or not bar or not strategy or not grid_spec:
+        raise ValueError("missing required optimization parameters")
+
+    log_msg("INFO", f"Running optimization for strategy={strategy}, grid={grid_spec}")
+
+    class _Writer(io.StringIO):
+        def __init__(self, level: int) -> None:
+            super().__init__()
+            self.level = level
+            self._last_line: Optional[str] = None
+        def write(self, s: str) -> int:
+            for line in s.splitlines():
+                line = line.strip()
+                if line and line != self._last_line:
+                    logger.log(self.level, line, extra={"run_id": run_id})
+                    self._last_line = line
+            return len(s)
+        def flush(self) -> None:
+            return
+
+    out_writer = _Writer(logging.INFO)
+    err_writer = _Writer(logging.ERROR)
+    with redirect_stdout(out_writer), redirect_stderr(err_writer):
+        rc = run_optimize(
+            inst=str(instrument_id),
+            tf=str(bar),
+            since=since,
+            until=until,
+            cash=cash,
+            commission=commission,
+            strategy_name=str(strategy),
+            grid_spec=str(grid_spec),
+            maxcpus=maxcpus,
+            constraint=str(constraint),
+            slip_perc=slip_perc,
+            slip_fixed=slip_fixed,
+            slip_open=slip_open,
+        )
+
+    if rc != 0:
+        raise RuntimeError(f"run_optimize exited with code {rc}")
+
+    with db.session_scope() as session:
+        repo.update_status(
+            session,
+            run_id,
+            status="succeeded",
+            progress=100,
+            error=None,
+        )
+
+
 def worker_loop(worker_id: int, db: DbConn, stop_event: threading.Event) -> None:
     repo = BacktestsRepo()
     results_repo = RunResultsRepo()
@@ -289,18 +371,21 @@ def worker_loop(worker_id: int, db: DbConn, stop_event: threading.Event) -> None
     while not stop_event.is_set():
         run = None
         payload: Dict[str, Any] = {}
+        run_type = None
         with db.session_scope() as session:
             run = repo.fetch_next_queued(session)
             if run:
                 # Mark as running immediately so other workers skip it.
                 repo.update_status(session, run.id, status="running", progress=1)
                 session.commit()
+                run_type = run.run_type
                 payload = run.params or {}
                 payload.update(
                     {
                         "strategy_id": getattr(run, "strategy_id", None) or payload.get("strategy_id"),
                         "instrument_id": run.instrument_id,
                         "bar": run.timeframe,
+                        "strategy": run.strategy,
                         "start_ts": payload.get("start_ts"),
                         "end_ts": payload.get("end_ts"),
                     }
@@ -313,18 +398,23 @@ def worker_loop(worker_id: int, db: DbConn, stop_event: threading.Event) -> None
 
         token = RUN_CTX.set(run_id)
         try:
-            results_out: Dict[str, Any] = {}
-            logger.info("Worker %s picked run_id=%s", worker_id, run_id, extra={"run_id": run_id})
-            process_backtest(run_id, payload, repo, db, results_out=results_out)
-            # Persist metrics if available
-            if results_out:
-                with db.session_scope() as s3:
-                    metrics_main = results_out.get("main") or {}
-                    plot_path = results_out.get("plot_path")
-                    results_repo.add_result(s3, run_id, label="main", params=payload.get("params") or {}, metrics=metrics_main, plot_path=plot_path)
-                    baseline_metrics = results_out.get("baseline")
-                    if baseline_metrics is not None:
-                        results_repo.add_result(s3, run_id, label="baseline", params={}, metrics=baseline_metrics, plot_path=None)
+            logger.info("Worker %s picked run_id=%s type=%s", worker_id, run_id, run_type, extra={"run_id": run_id})
+
+            if run_type == "optimize":
+                process_optimization(run_id, payload, repo, db)
+            else:
+                # Default to backtest
+                results_out: Dict[str, Any] = {}
+                process_backtest(run_id, payload, repo, db, results_out=results_out)
+                # Persist metrics if available
+                if results_out:
+                    with db.session_scope() as s3:
+                        metrics_main = results_out.get("main") or {}
+                        plot_path = results_out.get("plot_path")
+                        results_repo.add_result(s3, run_id, label="main", params=payload.get("params") or {}, metrics=metrics_main, plot_path=plot_path)
+                        baseline_metrics = results_out.get("baseline")
+                        if baseline_metrics is not None:
+                            results_repo.add_result(s3, run_id, label="baseline", params={}, metrics=baseline_metrics, plot_path=None)
         except Exception as exc:  # pragma: no cover - runtime safety
             logger.error("Worker %s failed run_id=%s: %s", worker_id, run_id, exc, extra={"run_id": run_id})
             with db.session_scope() as s2:
