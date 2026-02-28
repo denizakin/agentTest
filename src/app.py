@@ -5,7 +5,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import load_env_file
-from web.routes import backtests, coins, strategies, ui, jobs, optimizations
+from web.routes import backtests, coins, strategies, ui, jobs, optimizations, walkforwards
 
 
 def create_app() -> FastAPI:
@@ -37,6 +37,7 @@ def create_app() -> FastAPI:
     app.include_router(coins.router)
     app.include_router(backtests.router)
     app.include_router(optimizations.router)
+    app.include_router(walkforwards.router)
     app.include_router(jobs.router)
     app.include_router(ui.router)
     # Serve generated plot images (if any)

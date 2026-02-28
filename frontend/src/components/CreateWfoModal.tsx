@@ -2,12 +2,12 @@ import { Button, Group, Modal, NumberInput, Select, Stack, Text, Textarea, Loade
 import { DateTimePicker } from "@mantine/dates";
 import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { Strategy, CoinSummary, CreateOptimizationRequest, ParamRange } from "../api/types";
+import type { Strategy, CoinSummary, CreateWfoRequest, ParamRange } from "../api/types";
 
 type Props = {
   opened: boolean;
   onClose: () => void;
-  onSubmit: (params: CreateOptimizationRequest) => void;
+  onSubmit: (params: CreateWfoRequest) => void;
   strategies: Strategy[];
   coins: CoinSummary[];
   isLoading?: boolean;
@@ -21,8 +21,13 @@ type ParamRangeRow = {
   step: number;
 };
 
-export default function CreateOptimizationModal({ opened, onClose, onSubmit, strategies, coins, isLoading }: Props) {
+export default function CreateWfoModal({ opened, onClose, onSubmit, strategies, coins, isLoading }: Props) {
   const barOptions = ["1m", "5m", "15m", "1h", "4h", "1d", "1w", "1mo"];
+  const objectiveOptions = [
+    { value: "final", label: "Final Value" },
+    { value: "sharpe", label: "Sharpe Ratio" },
+    { value: "pf", label: "Profit Factor" },
+  ];
 
   const [instrumentId, setInstrumentId] = useState<string | null>(null);
   const [bar, setBar] = useState("1h");
@@ -33,35 +38,32 @@ export default function CreateOptimizationModal({ opened, onClose, onSubmit, str
   const [commission, setCommission] = useState<number | undefined>(0.001);
   const [slipPerc, setSlipPerc] = useState<number | undefined>(0);
   const [slipFixed, setSlipFixed] = useState<number | undefined>(0);
-  const [slipOpen, setSlipOpen] = useState(true);
   const [maxcpus, setMaxcpus] = useState<number | undefined>(1);
   const [constraint, setConstraint] = useState("");
+  const [objective, setObjective] = useState("final");
+  const [trainMonths, setTrainMonths] = useState<number | undefined>(12);
+  const [testMonths, setTestMonths] = useState<number | undefined>(3);
+  const [stepMonths, setStepMonths] = useState<number | undefined>(3);
   const [paramRanges, setParamRanges] = useState<ParamRangeRow[]>([]);
 
-  // Fetch strategy parameters when strategy changes
   const { data: paramsData, isLoading: paramsLoading } = useQuery({
     queryKey: ["strategy-params", strategyId],
     queryFn: async () => {
       if (!strategyId) return null;
       const res = await fetch(`/api/backtests/strategies/${strategyId}/params`);
-      if (!res.ok) {
-        console.warn(`Strategy params not available for strategy ${strategyId}`);
-        return null;
-      }
+      if (!res.ok) return null;
       return res.json();
     },
     enabled: !!strategyId,
     retry: false,
   });
 
-  // Build param range rows from fetched strategy params
   useEffect(() => {
     if (paramsData?.params) {
       const rows: ParamRangeRow[] = [];
       for (const [key, value] of Object.entries(paramsData.params)) {
         if (typeof value === "number") {
           const defaultVal = value as number;
-          // Auto-generate reasonable start/stop/step based on the default value
           const isInt = Number.isInteger(defaultVal);
           const absVal = Math.abs(defaultVal) || 1;
           const start = isInt ? Math.max(1, Math.floor(defaultVal * 0.5)) : defaultVal * 0.5;
@@ -85,15 +87,10 @@ export default function CreateOptimizationModal({ opened, onClose, onSubmit, str
   const handleSubmit = () => {
     if (!strategyId || !instrumentId || !bar || isLoading) return;
 
-    // Build param_ranges - only include params that have valid ranges
     const param_ranges: Record<string, ParamRange> = {};
     for (const p of paramRanges) {
       if (p.step > 0 && p.stop >= p.start) {
-        param_ranges[p.name] = {
-          start: p.start,
-          stop: p.stop,
-          step: p.step,
-        };
+        param_ranges[p.name] = { start: p.start, stop: p.stop, step: p.step };
       }
     }
 
@@ -108,13 +105,16 @@ export default function CreateOptimizationModal({ opened, onClose, onSubmit, str
       bar,
       param_ranges,
       constraint: constraint.trim() || undefined,
+      objective,
+      train_months: trainMonths,
+      test_months: testMonths,
+      step_months: stepMonths,
       start_ts: startDt?.toISOString(),
       end_ts: endDt?.toISOString(),
       cash,
       commission,
       slip_perc: slipPerc,
       slip_fixed: slipFixed,
-      slip_open: slipOpen,
       maxcpus,
     });
   };
@@ -125,7 +125,6 @@ export default function CreateOptimizationModal({ opened, onClose, onSubmit, str
     setParamRanges(updated);
   };
 
-  // Calculate total variant count
   const totalVariants = paramRanges.reduce((total, p) => {
     if (p.step <= 0 || p.stop < p.start) return total;
     const count = Math.floor((p.stop - p.start) / p.step) + 1;
@@ -133,7 +132,7 @@ export default function CreateOptimizationModal({ opened, onClose, onSubmit, str
   }, 1);
 
   return (
-    <Modal opened={opened} onClose={onClose} title="Create New Optimization" size="lg">
+    <Modal opened={opened} onClose={onClose} title="Create Walk-Forward Analysis" size="lg">
       <Stack gap="md">
         <Group grow>
           <Select
@@ -143,7 +142,6 @@ export default function CreateOptimizationModal({ opened, onClose, onSubmit, str
             value={strategyId}
             onChange={setStrategyId}
             searchable
-            nothingFoundMessage="No strategies"
             required
           />
           <Select
@@ -153,7 +151,6 @@ export default function CreateOptimizationModal({ opened, onClose, onSubmit, str
             value={instrumentId}
             onChange={setInstrumentId}
             searchable
-            nothingFoundMessage="No instruments"
             required
           />
         </Group>
@@ -161,13 +158,42 @@ export default function CreateOptimizationModal({ opened, onClose, onSubmit, str
         <Group grow>
           <Select
             label="Bar"
-            placeholder="Select bar"
             data={barOptions.map((b) => ({ value: b, label: b }))}
             value={bar}
             onChange={(v) => setBar(v || "1h")}
             required
           />
-          <NumberInput label="Cash" value={cash} onChange={(v) => setCash(v === "" ? undefined : Number(v))} min={0} step={1000} />
+          <Select
+            label="Objective"
+            data={objectiveOptions}
+            value={objective}
+            onChange={(v) => setObjective(v || "final")}
+          />
+        </Group>
+
+        {/* WFO window settings */}
+        <Group grow>
+          <NumberInput
+            label="Train (months)"
+            value={trainMonths}
+            onChange={(v) => setTrainMonths(v === "" ? undefined : Number(v))}
+            min={1}
+            step={1}
+          />
+          <NumberInput
+            label="Test (months)"
+            value={testMonths}
+            onChange={(v) => setTestMonths(v === "" ? undefined : Number(v))}
+            min={1}
+            step={1}
+          />
+          <NumberInput
+            label="Step (months)"
+            value={stepMonths}
+            onChange={(v) => setStepMonths(v === "" ? undefined : Number(v))}
+            min={1}
+            step={1}
+          />
         </Group>
 
         <Group grow>
@@ -188,6 +214,7 @@ export default function CreateOptimizationModal({ opened, onClose, onSubmit, str
         </Group>
 
         <Group grow>
+          <NumberInput label="Cash" value={cash} onChange={(v) => setCash(v === "" ? undefined : Number(v))} min={0} step={1000} />
           <NumberInput
             label="Commission"
             value={commission}
@@ -223,35 +250,23 @@ export default function CreateOptimizationModal({ opened, onClose, onSubmit, str
           />
         </Group>
 
-        {/* Parameter Ranges - auto-loaded from strategy */}
+        {/* Parameter Ranges */}
         <div style={{ borderTop: "1px solid #dee2e6", paddingTop: "12px", marginTop: "8px" }}>
           <Group justify="space-between" mb="sm">
-            <Text size="sm" fw={600} c="dimmed">
-              Parameter Ranges (Start / Stop / Step)
-            </Text>
+            <Text size="sm" fw={600} c="dimmed">Parameter Ranges (Start / Stop / Step)</Text>
             {paramRanges.length > 0 && (
-              <Text size="xs" c="blue">
-                Total combinations: {totalVariants.toLocaleString()}
-              </Text>
+              <Text size="xs" c="blue">Variants per fold: {totalVariants.toLocaleString()}</Text>
             )}
           </Group>
 
           {!strategyId && (
-            <Text size="sm" c="dimmed" ta="center" py="md">
-              Select a strategy to see its parameters
-            </Text>
+            <Text size="sm" c="dimmed" ta="center" py="md">Select a strategy to see its parameters</Text>
           )}
-
           {strategyId && paramsLoading && (
-            <div style={{ display: "flex", justifyContent: "center", padding: "16px" }}>
-              <Loader size="sm" />
-            </div>
+            <div style={{ display: "flex", justifyContent: "center", padding: "16px" }}><Loader size="sm" /></div>
           )}
-
           {strategyId && !paramsLoading && paramRanges.length === 0 && (
-            <Text size="sm" c="dimmed" ta="center" py="md">
-              No configurable parameters found for this strategy
-            </Text>
+            <Text size="sm" c="dimmed" ta="center" py="md">No configurable parameters found</Text>
           )}
 
           {paramRanges.map((param, idx) => (
@@ -260,26 +275,17 @@ export default function CreateOptimizationModal({ opened, onClose, onSubmit, str
                 {param.name} <Text span size="xs" c="dimmed">(default: {param.defaultValue})</Text>
               </Text>
               <Group grow>
-                <NumberInput
-                  label="Start"
-                  size="xs"
-                  value={param.start}
+                <NumberInput label="Start" size="xs" value={param.start}
                   onChange={(v) => updateParamRange(idx, "start", v === "" ? 1 : Number(v))}
                   step={Number.isInteger(param.defaultValue) ? 1 : 0.01}
                   decimalScale={Number.isInteger(param.defaultValue) ? 0 : 2}
                 />
-                <NumberInput
-                  label="Stop"
-                  size="xs"
-                  value={param.stop}
+                <NumberInput label="Stop" size="xs" value={param.stop}
                   onChange={(v) => updateParamRange(idx, "stop", v === "" ? 10 : Number(v))}
                   step={Number.isInteger(param.defaultValue) ? 1 : 0.01}
                   decimalScale={Number.isInteger(param.defaultValue) ? 0 : 2}
                 />
-                <NumberInput
-                  label="Step"
-                  size="xs"
-                  value={param.step}
+                <NumberInput label="Step" size="xs" value={param.step}
                   onChange={(v) => updateParamRange(idx, "step", v === "" ? 1 : Number(v))}
                   min={Number.isInteger(param.defaultValue) ? 1 : 0.01}
                   step={Number.isInteger(param.defaultValue) ? 1 : 0.01}
@@ -290,7 +296,6 @@ export default function CreateOptimizationModal({ opened, onClose, onSubmit, str
           ))}
         </div>
 
-        {/* Constraint */}
         <Textarea
           label="Constraint (optional)"
           placeholder="e.g., fast < slow"
@@ -300,15 +305,13 @@ export default function CreateOptimizationModal({ opened, onClose, onSubmit, str
         />
 
         <Group justify="flex-end">
-          <Button variant="light" onClick={onClose}>
-            Cancel
-          </Button>
+          <Button variant="light" onClick={onClose}>Cancel</Button>
           <Button
             onClick={handleSubmit}
             disabled={!strategyId || !instrumentId || !bar || paramRanges.length === 0 || isLoading}
             loading={isLoading}
           >
-            Start Optimization ({totalVariants.toLocaleString()} variants)
+            Start WFO ({totalVariants.toLocaleString()} variants/fold)
           </Button>
         </Group>
       </Stack>

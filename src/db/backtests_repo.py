@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -70,7 +71,7 @@ class BacktestsRepo:
         """
         stmt = (
             select(RunHeader)
-            .where(RunHeader.run_type.in_(["backtest", "optimize"]))
+            .where(RunHeader.run_type.in_(["backtest", "optimize", "wfo"]))
             .where(RunHeader.status == "queued")
             .order_by(RunHeader.started_at.asc())
             .with_for_update(skip_locked=True)
@@ -83,6 +84,33 @@ class BacktestsRepo:
 
     def get(self, session: Session, run_id: int) -> Optional[RunHeader]:
         return session.get(RunHeader, run_id)
+
+    def find_matching(
+        self,
+        session: Session,
+        strategy_id: int,
+        instrument_id: str,
+        timeframe: str,
+        params: Optional[Dict] = None,
+    ) -> Optional[RunHeader]:
+        """Find a succeeded/running/queued backtest with the same strategy/instrument/timeframe/params."""
+        stmt = (
+            select(RunHeader)
+            .where(RunHeader.run_type == "backtest")
+            .where(RunHeader.strategy_id == strategy_id)
+            .where(RunHeader.instrument_id == instrument_id)
+            .where(RunHeader.timeframe == timeframe)
+            .where(RunHeader.status.in_(["succeeded", "running", "queued"]))
+            .order_by(RunHeader.started_at.desc())
+            .limit(20)
+        )
+        candidates = session.scalars(stmt).all()
+        # Compare via JSON to normalize int/float differences (10 vs 10.0)
+        target_json = json.dumps(params or {}, sort_keys=True)
+        for c in candidates:
+            if json.dumps(c.params or {}, sort_keys=True) == target_json:
+                return c
+        return None
 
     def update_status(
         self,

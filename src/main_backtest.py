@@ -724,7 +724,9 @@ def _pick_best_by_objective(rows: List[Dict[str, Any]], objective: str) -> Optio
 
 def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str], cash: float, commission: float,
                  strategy_name: str, grid_spec: str, maxcpus: int, constraint: str,
-                 slip_perc: float = 0.0, slip_fixed: float = 0.0, slip_open: bool = True) -> int:
+                 slip_perc: float = 0.0, slip_fixed: float = 0.0, slip_open: bool = True,
+                 run_id: Optional[int] = None,
+                 on_progress: Optional[Callable[[float], None]] = None) -> int:
     load_env_file()
     db = DbConn()
     logger = RunLogger(Path("resources/plots"))
@@ -741,12 +743,20 @@ def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str],
             except Exception:
                 pass
 
+    def _progress(pct: float) -> None:
+        if on_progress is not None:
+            on_progress(pct)
+
+    _progress(0.05)
+
     df = _fetch_df(db, inst, tf, since_dt, until_dt, view=view)
     if df.empty:
         print("No data returned for the given parameters.")
         return 1
     else:
         print(f"Loaded {len(df)} bars from {df['ts'].iloc[0]} to {df['ts'].iloc[-1]}")
+
+    _progress(0.10)
 
     grid = _parse_grid(grid_spec)
     if not grid:
@@ -783,7 +793,9 @@ def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str],
     cerebro.optreturn = False  # return full strategy instances
     cerebro.optstrategy(StrategyCls, **grid)
     print(f"Starting optimization for '{strategy_name}' with grid: {grid}")
+    _progress(0.15)
     results = cerebro.run(maxcpus=int(maxcpus))
+    _progress(0.70)
 
     # Flatten and collect metrics
     flat: List[bt.Strategy] = []
@@ -794,31 +806,36 @@ def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str],
         elif isinstance(res, bt.Strategy):
             flat.append(res)
 
+    print(f"Optimization finished. Processing {len(flat)} variant results...")
+
     rows: List[Dict[str, Any]] = []
     with db.session_scope() as s:
-        run_id = logger.start_run(
-            session=s,
-            run_type="optimize",
-            instrument_id=inst,
-            timeframe=tf,
-            strategy=strategy_name,
-            params={"grid": grid},
-            cash=cash,
-            commission=commission,
-            slip_perc=slip_perc,
-            slip_fixed=slip_fixed,
-            slip_open=slip_open,
-            baseline=False,
-        )
+        # Only create a new run_header if run_id not provided (e.g., CLI usage)
+        # When called from worker, run_id is already created by the API
+        if run_id is None:
+            run_id = logger.start_run(
+                session=s,
+                run_type="optimize",
+                instrument_id=inst,
+                timeframe=tf,
+                strategy=strategy_name,
+                params={"grid": grid},
+                cash=cash,
+                commission=commission,
+                slip_perc=slip_perc,
+                slip_fixed=slip_fixed,
+                slip_open=slip_open,
+                baseline=False,
+            )
 
-        for strat in flat:
-            # Extract params for this run
+        grid_keys = set(grid.keys())
+        total_flat = len(flat)
+        for idx_strat, strat in enumerate(flat):
+            # Extract params for this run - only include optimized params from grid
             p = getattr(strat, 'params', None)
             p_dict = {}
             if p is not None:
-                for k in dir(p):
-                    if k.startswith('_'):
-                        continue
+                for k in grid_keys:
                     try:
                         val = getattr(p, k)
                     except Exception:
@@ -850,10 +867,24 @@ def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str],
             profit_factor = (float(gross_won) / gross_lost) if gross_won is not None and gross_lost > 0 else None
             win_rate = (won_total / total_closed * 100.0) if total_closed else None
 
-            try:
-                final_value = float(strat.broker.getvalue())
-            except Exception:
-                final_value = float('nan')
+            # In optimization mode, broker is shared/reset between runs,
+            # so strat.broker.getvalue() returns NaN. Calculate from PnL instead.
+            pnl_net_total = (((ta.get('pnl') or {}).get('net') or {}).get('total') if isinstance(ta, dict) else None)
+            if pnl_net_total is not None:
+                final_value = float(cash) + float(pnl_net_total)
+            else:
+                final_value = float(cash)  # no trades = starting cash
+
+            # Long/short trade counts
+            long_count = ((ta.get('long') or {}).get('total') if isinstance(ta, dict) else None)
+            short_count = ((ta.get('short') or {}).get('total') if isinstance(ta, dict) else None)
+
+            # Best/worst individual trade PnL
+            best_pnl = (((ta.get('won') or {}).get('pnl') or {}).get('max') if isinstance(ta, dict) else None)
+            worst_pnl = (((ta.get('lost') or {}).get('pnl') or {}).get('max') if isinstance(ta, dict) else None)
+
+            # Average PnL per trade
+            avg_pnl = (((ta.get('pnl') or {}).get('net') or {}).get('average') if isinstance(ta, dict) else None)
 
             sqn_val = None
             try:
@@ -862,15 +893,22 @@ def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str],
             except Exception:
                 pass
 
+            sharpe_val = s_an.get('sharperatio') if isinstance(s_an, dict) else None
+
             row = {
                 'params': p_dict,
                 'final': final_value,
-                'sharpe': s_an.get('sharperatio') if isinstance(s_an, dict) else None,
+                'sharpe': sharpe_val,
                 'maxdd': maxdd,
                 'winrate': win_rate,
                 'pf': profit_factor,
                 'sqn': sqn_val,
                 'total_trades': total_closed,
+                'long_count': long_count,
+                'short_count': short_count,
+                'best_pnl': best_pnl,
+                'worst_pnl': worst_pnl,
+                'avg_pnl': avg_pnl,
             }
             rows.append(row)
             logger.log_optimization_variant(
@@ -878,14 +916,27 @@ def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str],
                 run_id=run_id,
                 variant_params=p_dict,
                 final_value=final_value,
-                sharpe=s_an.get('sharperatio') if isinstance(s_an, dict) else None,
+                sharpe=sharpe_val,
                 maxdd=maxdd,
                 winrate=win_rate,
                 profit_factor=profit_factor,
                 sqn=sqn_val,
                 total_trades=total_closed,
+                long_count=long_count,
+                short_count=short_count,
+                won_count=int(won_total) if won_total is not None else None,
+                lost_count=int(total_closed - won_total) if total_closed and won_total is not None else None,
+                best_pnl=float(best_pnl) if best_pnl is not None else None,
+                worst_pnl=float(worst_pnl) if worst_pnl is not None else None,
+                avg_pnl=float(avg_pnl) if avg_pnl is not None else None,
             )
+            # Progress: 70-90% proportional to variants processed
+            if total_flat > 0:
+                variant_pct = 0.70 + 0.20 * ((idx_strat + 1) / total_flat)
+                _progress(variant_pct)
 
+        print(f"Saved {len(rows)} optimization variants to DB (run_id={run_id})")
+        _progress(0.92)
         logger.complete_run(s, run_id)
 
     if not rows:
@@ -927,10 +978,16 @@ def _slice_df_by_range(df: pd.DataFrame, start: datetime, end: datetime) -> pd.D
 def run_wfo(inst: str, tf: str, since: Optional[str], until: Optional[str], cash: float, commission: float,
             strategy_name: str, grid_spec: str, train_months: int, test_months: int, step_months: int,
             constraint: str, objective: str, maxcpus: int,
-            slip_perc: float = 0.0, slip_fixed: float = 0.0, slip_open: bool = True) -> int:
+            slip_perc: float = 0.0, slip_fixed: float = 0.0, slip_open: bool = True,
+            run_id: Optional[int] = None,
+            on_progress: Optional[Callable[[float], None]] = None) -> int:
     load_env_file()
     db = DbConn()
     logger = RunLogger(Path("resources/plots"))
+
+    def _progress(frac: float) -> None:
+        if on_progress:
+            on_progress(frac)
 
     since_dt = _parse_time(since)
     until_dt = _parse_time(until)
@@ -950,6 +1007,8 @@ def run_wfo(inst: str, tf: str, since: Optional[str], until: Optional[str], cash
     else:
         print(f"Loaded {len(df)} bars from {df['ts'].iloc[0]} to {df['ts'].iloc[-1]}")
 
+    _progress(0.05)
+
     grid = _parse_grid(grid_spec)
     if not grid:
         print("No WFO grid provided. Use --wfo-grid (or --opt-grid), e.g., fast=5:30:1,slow=10:60:5")
@@ -959,21 +1018,38 @@ def run_wfo(inst: str, tf: str, since: Optional[str], until: Optional[str], cash
     end_ts = df["ts"].max()
     folds: List[Dict[str, Any]] = []
 
+    _progress(0.10)
+
     with db.session_scope() as s:
-        run_id = logger.start_run(
-            session=s,
-            run_type="wfo",
-            instrument_id=inst,
-            timeframe=tf,
-            strategy=strategy_name,
-            params={"grid": grid, "objective": objective},
-            cash=cash,
-            commission=commission,
-            slip_perc=slip_perc,
-            slip_fixed=slip_fixed,
-            slip_open=slip_open,
-            baseline=False,
-        )
+        if run_id is None:
+            run_id = logger.start_run(
+                session=s,
+                run_type="wfo",
+                instrument_id=inst,
+                timeframe=tf,
+                strategy=strategy_name,
+                params={"grid": grid, "objective": objective},
+                cash=cash,
+                commission=commission,
+                slip_perc=slip_perc,
+                slip_fixed=slip_fixed,
+                slip_open=slip_open,
+                baseline=False,
+            )
+
+        # Count total expected folds for progress reporting
+        total_expected_folds = 0
+        ts_cursor = start_ts
+        while True:
+            te = _month_delta(ts_cursor, train_months)
+            if te >= end_ts or ts_cursor >= end_ts:
+                break
+            tst = te
+            if tst >= end_ts:
+                break
+            total_expected_folds += 1
+            ts_cursor = _month_delta(ts_cursor, step_months)
+        total_expected_folds = max(total_expected_folds, 1)
 
         train_start = start_ts
         fold_idx = 0
@@ -1117,8 +1193,13 @@ def run_wfo(inst: str, tf: str, since: Optional[str], until: Optional[str], cash
                 metrics=test_metrics,
             )
 
+            # Progress: 15% -> 90% across folds
+            fold_pct = 0.15 + (fold_idx / total_expected_folds) * 0.75
+            _progress(min(fold_pct, 0.90))
+
             train_start = _month_delta(train_start, step_months)
 
+        _progress(0.95)
         logger.complete_run(s, run_id)
 
     if not folds:

@@ -35,6 +35,7 @@ export type BacktestSummary = {
   error?: string | null;
   start_ts?: string | null;
   end_ts?: string | null;
+  strategy_params?: Record<string, unknown> | null;
 };
 
 export type CreateBacktestJobRequest = {
@@ -138,6 +139,13 @@ export type OptimizationVariant = {
   profit_factor?: number | null;
   sqn?: number | null;
   total_trades?: number | null;
+  long_count?: number | null;
+  short_count?: number | null;
+  won_count?: number | null;
+  lost_count?: number | null;
+  best_pnl?: number | null;
+  worst_pnl?: number | null;
+  avg_pnl?: number | null;
 };
 
 export type OptimizationDetail = {
@@ -155,6 +163,13 @@ export type OptimizationDetail = {
   constraint?: string | null;
   total_variants: number;
   variants: OptimizationVariant[];
+  cash?: number | null;
+  commission?: number | null;
+  slip_perc?: number | null;
+  slip_fixed?: number | null;
+  start_ts?: string | null;
+  end_ts?: string | null;
+  maxcpus?: number | null;
 };
 
 export type CreateOptimizationRequest = {
@@ -163,6 +178,85 @@ export type CreateOptimizationRequest = {
   bar: string;
   param_ranges: Record<string, ParamRange>;
   constraint?: string;
+  start_ts?: string;
+  end_ts?: string;
+  cash?: number;
+  commission?: number;
+  slip_perc?: number;
+  slip_fixed?: number;
+  slip_open?: boolean;
+  maxcpus?: number;
+};
+
+// ── Walk-Forward Analysis ──────────────────────────────────────────────
+
+export type WfoSummary = {
+  run_id: number;
+  strategy_id: number;
+  strategy_name?: string | null;
+  instrument_id: string;
+  bar: string;
+  status: string;
+  submitted_at: string;
+  progress: number;
+  error?: string | null;
+  total_folds: number;
+  objective?: string | null;
+  train_months?: number | null;
+  test_months?: number | null;
+  step_months?: number | null;
+};
+
+export type WfoFoldItem = {
+  id: number;
+  fold_index: number;
+  train_start: string;
+  train_end: string;
+  test_start: string;
+  test_end: string;
+  params?: Record<string, unknown> | null;
+  train_objective?: number | null;
+  metrics?: Record<string, unknown> | null;
+};
+
+export type WfoDetail = {
+  run_id: number;
+  strategy_id: number;
+  strategy_name: string;
+  instrument_id: string;
+  bar: string;
+  status: string;
+  submitted_at: string;
+  ended_at?: string | null;
+  progress: number;
+  error?: string | null;
+  param_ranges: Record<string, ParamRange>;
+  constraint?: string | null;
+  objective?: string | null;
+  train_months?: number | null;
+  test_months?: number | null;
+  step_months?: number | null;
+  total_folds: number;
+  folds: WfoFoldItem[];
+  cash?: number | null;
+  commission?: number | null;
+  slip_perc?: number | null;
+  slip_fixed?: number | null;
+  start_ts?: string | null;
+  end_ts?: string | null;
+  maxcpus?: number | null;
+};
+
+export type CreateWfoRequest = {
+  strategy_id: number;
+  instrument_id: string;
+  bar: string;
+  param_ranges: Record<string, ParamRange>;
+  constraint?: string;
+  objective?: string;
+  train_months?: number;
+  test_months?: number;
+  step_months?: number;
   start_ts?: string;
   end_ts?: string;
   cash?: number;

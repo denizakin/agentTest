@@ -20,12 +20,13 @@ from db.run_logs_repo import RunLogsRepo
 from db.run_results_repo import RunResultsRepo
 from db.strategies_repo import StrategiesRepo
 from db.optimization_results_repo import OptimizationResultsRepo
-from main_backtest import run_backtest, run_optimize
+from main_backtest import run_backtest, run_optimize, run_wfo
 
 
 POLL_SECONDS = float(os.getenv("WORKER_POLL_SECONDS", "1.0"))
 CONCURRENCY = int(os.getenv("WORKER_CONCURRENCY", "2"))
 RUN_CTX: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar("run_id", default=None)
+WORKER_CTX: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar("worker_id", default=None)
 LOG_GUARD: contextvars.ContextVar[bool] = contextvars.ContextVar("log_guard", default=False)
 
 
@@ -61,6 +62,16 @@ class RunLogHandler(logging.Handler):
             LOG_GUARD.reset(token)
 
 
+class _WorkerFormatter(logging.Formatter):
+    """Log formatter that includes worker ID from context variable."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        wid = WORKER_CTX.get()
+        prefix = f"[worker-{wid}]" if wid is not None else "[worker-?]"
+        record.worker_prefix = prefix  # type: ignore[attr-defined]
+        return super().format(record)
+
+
 def get_logger(db: DbConn) -> logging.Logger:
     logger = logging.getLogger("worker")
     if logger.handlers:
@@ -68,7 +79,7 @@ def get_logger(db: DbConn) -> logging.Logger:
     logger.setLevel(logging.INFO)
     stream = logging.StreamHandler()
     stream.setLevel(logging.INFO)
-    stream.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(message)s"))
+    stream.setFormatter(_WorkerFormatter("[%(asctime)s] %(worker_prefix)s %(levelname)s %(message)s"))
     db_handler = RunLogHandler(db)
     db_handler.setLevel(logging.INFO)
     logger.addHandler(stream)
@@ -150,7 +161,6 @@ def process_backtest(run_id: int, payload: dict, repo: BacktestsRepo, db: DbConn
     strategy_id = payload.get("strategy_id")
     instrument_id = payload.get("instrument_id")
     bar = payload.get("bar")
-    params = payload.get("params") or {}
     start_ts = payload.get("start_ts")
     end_ts = payload.get("end_ts")
     strategy_name = payload.get("strategy_name") or payload.get("strategy") or "sma"
@@ -158,7 +168,12 @@ def process_backtest(run_id: int, payload: dict, repo: BacktestsRepo, db: DbConn
     if not strategy_id or not instrument_id or not bar:
         raise ValueError("missing strategy_id/instrument_id/bar")
 
-    # Separate meta params from strategy params
+    # Strategy params can be either nested under "params" key (old job queue format)
+    # or flat in the payload (worker loop format from run.params).
+    # We merge both sources and filter out meta keys.
+    nested_params = payload.get("params") or {}
+    merged = {**payload, **nested_params}
+
     meta_keys = {
         "strategy_id",
         "instrument_id",
@@ -179,28 +194,25 @@ def process_backtest(run_id: int, payload: dict, repo: BacktestsRepo, db: DbConn
         "slip_open",
         "strategy",
         "strategy_name",
+        "params",
+        "type",
+        "run_id",
+        "data",
     }
-    strat_params = {k: v for k, v in params.items() if k not in meta_keys}
+    strat_params = {k: v for k, v in merged.items() if k not in meta_keys}
 
-    cash = float(params.get("cash", 10000))
-    commission = float(params.get("commission", 0.001))
-    stake = int(params.get("stake", 1))
-    plot = bool(params.get("plot", False))
-    refresh = bool(params.get("refresh", False))
-    use_sizer = bool(params.get("use_sizer", False))
-    coc = bool(params.get("coc", False))
-    baseline = bool(params.get("baseline", True))
-    parallel_baseline = bool(params.get("parallel_baseline", False))
-    slip_perc = float(params.get("slip_perc", 0.0))
-    slip_fixed = float(params.get("slip_fixed", 0.0))
-    slip_open = bool(params.get("slip_open", True))
-    # If job placed top-level flags, merge them
-    plot = bool(payload.get("plot", plot))
-    refresh = bool(payload.get("refresh", refresh))
-    baseline = bool(payload.get("baseline", baseline))
-    parallel_baseline = bool(payload.get("parallel_baseline", parallel_baseline))
-    use_sizer = bool(payload.get("use_sizer", use_sizer))
-    coc = bool(payload.get("coc", coc))
+    cash = float(merged.get("cash", 10000))
+    commission = float(merged.get("commission", 0.001))
+    stake = int(merged.get("stake", 1))
+    plot = bool(merged.get("plot", False))
+    refresh = bool(merged.get("refresh", False))
+    use_sizer = bool(merged.get("use_sizer", False))
+    coc = bool(merged.get("coc", False))
+    baseline = bool(merged.get("baseline", True))
+    parallel_baseline = bool(merged.get("parallel_baseline", False))
+    slip_perc = float(merged.get("slip_perc", 0.0))
+    slip_fixed = float(merged.get("slip_fixed", 0.0))
+    slip_open = bool(merged.get("slip_open", True))
 
     # Progress callback based on elapsed time between start/end_ts or data range
     start_dt = pd.to_datetime(start_ts) if start_ts else None
@@ -218,7 +230,7 @@ def process_backtest(run_id: int, payload: dict, repo: BacktestsRepo, db: DbConn
         except Exception:
             pass
 
-    log_msg("INFO", f"Running backtest via main_backtest.run_backtest for strategy_id={strategy_id}, strategy={strategy_name}")
+    log_msg("INFO", f"Running backtest for strategy_id={strategy_id}, strategy={strategy_name}, strat_params={strat_params}")
 
     class _Writer(io.StringIO):
         def __init__(self, level: int) -> None:
@@ -297,14 +309,15 @@ def process_optimization(run_id: int, payload: dict, repo: BacktestsRepo, db: Db
             log_msg("ERROR", f"Failed to mark running: {exc}")
             raise
     log_msg("INFO", f"Optimization started (run_id={run_id})")
+    log_msg("INFO", f"Optimization payload keys: {list(payload.keys())}")
 
     instrument_id = payload.get("instrument_id")
     bar = payload.get("bar")
     strategy = payload.get("strategy")
     grid_spec = payload.get("grid_spec")
-    constraint = payload.get("constraint", "")
-    since = payload.get("since")
-    until = payload.get("until")
+    constraint = payload.get("constraint") or ""
+    since = payload.get("start_ts") or payload.get("since")
+    until = payload.get("end_ts") or payload.get("until")
     cash = float(payload.get("cash", 10000))
     commission = float(payload.get("commission", 0.001))
     slip_perc = float(payload.get("slip_perc", 0.0))
@@ -312,10 +325,28 @@ def process_optimization(run_id: int, payload: dict, repo: BacktestsRepo, db: Db
     slip_open = bool(payload.get("slip_open", True))
     maxcpus = int(payload.get("maxcpus", 1))
 
-    if not instrument_id or not bar or not strategy or not grid_spec:
-        raise ValueError("missing required optimization parameters")
+    missing = []
+    if not instrument_id: missing.append("instrument_id")
+    if not bar: missing.append("bar")
+    if not strategy: missing.append("strategy")
+    if not grid_spec: missing.append(f"grid_spec (got: {grid_spec!r})")
+    if missing:
+        raise ValueError(f"missing required optimization parameters: {', '.join(missing)}")
 
     log_msg("INFO", f"Running optimization for strategy={strategy}, grid={grid_spec}")
+
+    last_pct = {"v": 0.0}
+
+    def on_progress(frac: float) -> None:
+        pct = round(max(0.0, min(1.0, frac)) * 100.0, 2)
+        if pct <= last_pct["v"]:
+            return
+        last_pct["v"] = pct
+        try:
+            with db.session_scope() as s:
+                repo.update_status(s, run_id, status="running", progress=pct)
+        except Exception:
+            pass
 
     class _Writer(io.StringIO):
         def __init__(self, level: int) -> None:
@@ -349,9 +380,17 @@ def process_optimization(run_id: int, payload: dict, repo: BacktestsRepo, db: Db
             slip_perc=slip_perc,
             slip_fixed=slip_fixed,
             slip_open=slip_open,
+            run_id=run_id,
+            on_progress=on_progress,
         )
 
-    if rc != 0:
+    if rc == 3:
+        # No optimization results collected (constraint filtered all, or no valid runs)
+        log_msg("WARNING", "Optimization completed but no results collected (possibly due to constraint or failures)")
+        with db.session_scope() as session:
+            repo.update_status(session, run_id, status="succeeded", progress=100, error="No results collected")
+        return
+    elif rc != 0:
         raise RuntimeError(f"run_optimize exited with code {rc}")
 
     with db.session_scope() as session:
@@ -364,7 +403,116 @@ def process_optimization(run_id: int, payload: dict, repo: BacktestsRepo, db: Db
         )
 
 
+def process_wfo(run_id: int, payload: dict, repo: BacktestsRepo, db: DbConn) -> None:
+    logger = get_logger(db)
+    def log_msg(level: str, msg: str) -> None:
+        logger.log(getattr(logging, level, logging.INFO), msg, extra={"run_id": run_id})
+
+    with db.session_scope() as session:
+        try:
+            repo.update_status(session, run_id, status="running", progress=5)
+        except Exception as exc:
+            session.rollback()
+            log_msg("ERROR", f"Failed to mark running: {exc}")
+            raise
+    log_msg("INFO", f"WFO started (run_id={run_id})")
+
+    instrument_id = payload.get("instrument_id")
+    bar = payload.get("bar")
+    strategy = payload.get("strategy")
+    grid_spec = payload.get("grid_spec")
+    constraint = payload.get("constraint") or ""
+    objective = payload.get("objective", "final")
+    train_months = int(payload.get("train_months", 12))
+    test_months = int(payload.get("test_months", 3))
+    step_months = int(payload.get("step_months", 3))
+    since = payload.get("start_ts") or payload.get("since")
+    until = payload.get("end_ts") or payload.get("until")
+    cash = float(payload.get("cash", 10000))
+    commission = float(payload.get("commission", 0.001))
+    slip_perc = float(payload.get("slip_perc", 0.0))
+    slip_fixed = float(payload.get("slip_fixed", 0.0))
+    slip_open = bool(payload.get("slip_open", True))
+    maxcpus = int(payload.get("maxcpus", 1))
+
+    missing = []
+    if not instrument_id: missing.append("instrument_id")
+    if not bar: missing.append("bar")
+    if not strategy: missing.append("strategy")
+    if not grid_spec: missing.append(f"grid_spec (got: {grid_spec!r})")
+    if missing:
+        raise ValueError(f"missing required WFO parameters: {', '.join(missing)}")
+
+    log_msg("INFO", f"Running WFO for strategy={strategy}, grid={grid_spec}, "
+            f"train={train_months}m test={test_months}m step={step_months}m obj={objective}")
+
+    last_pct = {"v": 0.0}
+
+    def on_progress(frac: float) -> None:
+        pct = round(max(0.0, min(1.0, frac)) * 100.0, 2)
+        if pct <= last_pct["v"]:
+            return
+        last_pct["v"] = pct
+        try:
+            with db.session_scope() as s:
+                repo.update_status(s, run_id, status="running", progress=pct)
+        except Exception:
+            pass
+
+    class _Writer(io.StringIO):
+        def __init__(self, level: int) -> None:
+            super().__init__()
+            self.level = level
+            self._last_line: Optional[str] = None
+        def write(self, s: str) -> int:
+            for line in s.splitlines():
+                line = line.strip()
+                if line and line != self._last_line:
+                    logger.log(self.level, line, extra={"run_id": run_id})
+                    self._last_line = line
+            return len(s)
+        def flush(self) -> None:
+            return
+
+    out_writer = _Writer(logging.INFO)
+    err_writer = _Writer(logging.ERROR)
+    with redirect_stdout(out_writer), redirect_stderr(err_writer):
+        rc = run_wfo(
+            inst=str(instrument_id),
+            tf=str(bar),
+            since=since,
+            until=until,
+            cash=cash,
+            commission=commission,
+            strategy_name=str(strategy),
+            grid_spec=str(grid_spec),
+            train_months=train_months,
+            test_months=test_months,
+            step_months=step_months,
+            constraint=str(constraint),
+            objective=str(objective),
+            maxcpus=maxcpus,
+            slip_perc=slip_perc,
+            slip_fixed=slip_fixed,
+            slip_open=slip_open,
+            run_id=run_id,
+            on_progress=on_progress,
+        )
+
+    if rc == 3:
+        log_msg("WARNING", "WFO completed but no folds produced (check date ranges and window sizes)")
+        with db.session_scope() as session:
+            repo.update_status(session, run_id, status="succeeded", progress=100, error="No folds produced")
+        return
+    elif rc != 0:
+        raise RuntimeError(f"run_wfo exited with code {rc}")
+
+    with db.session_scope() as session:
+        repo.update_status(session, run_id, status="succeeded", progress=100, error=None)
+
+
 def worker_loop(worker_id: int, db: DbConn, stop_event: threading.Event) -> None:
+    WORKER_CTX.set(worker_id)
     repo = BacktestsRepo()
     results_repo = RunResultsRepo()
     logger = get_logger(db)
@@ -379,7 +527,7 @@ def worker_loop(worker_id: int, db: DbConn, stop_event: threading.Event) -> None
                 repo.update_status(session, run.id, status="running", progress=1)
                 session.commit()
                 run_type = run.run_type
-                payload = run.params or {}
+                payload = dict(run.params) if run.params else {}
                 payload.update(
                     {
                         "strategy_id": getattr(run, "strategy_id", None) or payload.get("strategy_id"),
@@ -388,6 +536,11 @@ def worker_loop(worker_id: int, db: DbConn, stop_event: threading.Event) -> None
                         "strategy": run.strategy,
                         "start_ts": payload.get("start_ts"),
                         "end_ts": payload.get("end_ts"),
+                        "cash": float(run.cash) if run.cash is not None else payload.get("cash", 10000),
+                        "commission": float(run.commission) if run.commission is not None else payload.get("commission", 0.001),
+                        "slip_perc": float(run.slip_perc) if run.slip_perc is not None else payload.get("slip_perc", 0.0),
+                        "slip_fixed": float(run.slip_fixed) if run.slip_fixed is not None else payload.get("slip_fixed", 0.0),
+                        "slip_open": bool(run.slip_open) if run.slip_open is not None else payload.get("slip_open", True),
                     }
                 )
                 run_id = run.id
@@ -402,6 +555,8 @@ def worker_loop(worker_id: int, db: DbConn, stop_event: threading.Event) -> None
 
             if run_type == "optimize":
                 process_optimization(run_id, payload, repo, db)
+            elif run_type == "wfo":
+                process_wfo(run_id, payload, repo, db)
             else:
                 # Default to backtest
                 results_out: Dict[str, Any] = {}

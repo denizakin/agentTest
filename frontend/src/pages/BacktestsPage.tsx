@@ -5,19 +5,34 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { IconRefresh } from "@tabler/icons-react";
 import JobProgress from "../components/JobProgress";
 import { getJson, postJson } from "../api/client";
-import type { BacktestSummary, Strategy, CoinSummary, CreateBacktestJobRequest, RunLogItem, RunResultItem, ChartResponse } from "../api/types";
-import { useEffect, useState, useRef } from "react";
-import BacktestChart, { type BacktestChartHandle } from "../components/BacktestChart";
-import BacktestResults from "../components/BacktestResults";
+import type { BacktestSummary, Strategy, CoinSummary, CreateBacktestJobRequest, RunLogItem, RunResultItem } from "../api/types";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import BacktestDetailModal from "../components/BacktestDetailModal";
 import CreateBacktestModal, { type BacktestParams } from "../components/CreateBacktestModal";
 
 export default function BacktestsPage() {
   const qc = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [createModalOpened, setCreateModalOpened] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [viewMode, setViewMode] = useState<"chart" | "logs" | null>(null);
   const [resultsMap, setResultsMap] = useState<Record<number, RunResultItem[]>>({});
-  const chartRef = useRef<BacktestChartHandle>(null);
+
+  // Auto-open from URL param ?run=123
+  useEffect(() => {
+    const runParam = searchParams.get("run");
+    if (runParam) {
+      const runId = parseInt(runParam, 10);
+      if (!isNaN(runId)) {
+        setSelectedRunId(runId);
+        setViewMode("chart");
+        // Clear the param so it doesn't re-trigger
+        searchParams.delete("run");
+        setSearchParams(searchParams, { replace: true });
+      }
+    }
+  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
   // Filter states
   const [filterStrategy, setFilterStrategy] = useState<string | null>(null);
@@ -66,12 +81,6 @@ export default function BacktestsPage() {
     queryFn: () => getJson<RunResultItem[]>(`/backtests/${selectedRunId}/results`),
     enabled: selectedRunId !== null,
     refetchInterval: 4000,
-  });
-
-  const chartQuery = useQuery({
-    queryKey: ["backtest-chart", selectedRunId],
-    queryFn: () => getJson<ChartResponse>(`/backtests/${selectedRunId}/chart`),
-    enabled: selectedRunId !== null && viewMode === "chart",
   });
 
   useEffect(() => {
@@ -314,6 +323,7 @@ export default function BacktestsPage() {
                   <Table.Th>Strategy</Table.Th>
                   <Table.Th>Instrument</Table.Th>
                   <Table.Th>Bar</Table.Th>
+                  <Table.Th>Params</Table.Th>
                   <Table.Th>Start</Table.Th>
                   <Table.Th>End</Table.Th>
                   <Table.Th>Status</Table.Th>
@@ -352,6 +362,13 @@ export default function BacktestsPage() {
                       <Table.Td>{bt.strategy_name ?? "Strategy"}</Table.Td>
                       <Table.Td>{bt.instrument_id}</Table.Td>
                       <Table.Td>{bt.bar}</Table.Td>
+                      <Table.Td>
+                        <Text size="xs" style={{ fontFamily: "monospace", whiteSpace: "nowrap" }}>
+                          {bt.strategy_params && Object.keys(bt.strategy_params).length > 0
+                            ? Object.entries(bt.strategy_params).map(([k, v]) => `${k}=${v}`).join(", ")
+                            : "—"}
+                        </Text>
+                      </Table.Td>
                       <Table.Td>
                         <Text size="xs">{bt.start_ts ? new Date(bt.start_ts).toLocaleDateString() : "-"}</Text>
                       </Table.Td>
@@ -407,35 +424,11 @@ export default function BacktestsPage() {
         )}
       </Card>
 
-      {/* Chart Modal */}
-      <Modal
-        opened={viewMode === "chart" && selectedRunId !== null}
-        onClose={() => {
-          setViewMode(null);
-          setSelectedRunId(null);
-        }}
-        title={`Chart for run #${selectedRunId}`}
-        size="95%"
-        styles={{ body: { height: "85vh", display: "flex", flexDirection: "column", gap: "20px" } }}
-      >
-        {chartQuery.isLoading && <Text c="dimmed">Loading chart...</Text>}
-        {chartQuery.isError && <Text c="red">Failed to load chart</Text>}
-        {chartQuery.data && (
-          <>
-            {/* Chart Section */}
-            <div style={{ flex: "0 0 50%", minHeight: 0 }}>
-              <BacktestChart ref={chartRef} data={chartQuery.data} />
-            </div>
-
-            {/* Results Section */}
-            <div style={{ flex: "0 0 auto", overflow: "auto" }}>
-              {selectedRunId && resultsMap[selectedRunId] && (
-                <BacktestResults results={resultsMap[selectedRunId]} runId={selectedRunId} chartRef={chartRef} />
-              )}
-            </div>
-          </>
-        )}
-      </Modal>
+      {/* Chart + Results Modal */}
+      <BacktestDetailModal
+        runId={viewMode === "chart" ? selectedRunId : null}
+        onClose={() => { setViewMode(null); setSelectedRunId(null); }}
+      />
 
       {/* Logs Modal */}
       <Modal

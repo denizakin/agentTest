@@ -19,6 +19,7 @@ if str(SRC) not in sys.path:
 from config import load_env_file, get_database_url  # type: ignore
 from db.base import Base  # type: ignore
 from db.poco import candlestick  # noqa: F401  # ensure models are imported
+from db.poco import optimization_result  # noqa: F401
 
 # This is the Alembic Config object, which provides access to the values
 config = context.config

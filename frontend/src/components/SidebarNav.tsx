@@ -6,7 +6,7 @@ const nav = [
   { label: "Coins", to: "/coins", icon: IconHome2 },
   { label: "Strategies", to: "/strategies", icon: IconChartLine },
   { label: "Backtests", to: "/backtests", icon: IconRocket },
-  { label: "Optimization", to: "/optimization", icon: IconSettings },
+  { label: "Optimizations", to: "/optimizations", icon: IconSettings },
   { label: "WF Analysis", to: "/wf", icon: IconChartPie },
   { label: "Activity", to: "/activity", icon: IconActivity },
 ];

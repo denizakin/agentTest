@@ -114,6 +114,13 @@ class RunLogger:
         profit_factor: Optional[float] = None,
         sqn: Optional[float] = None,
         total_trades: Optional[int] = None,
+        long_count: Optional[int] = None,
+        short_count: Optional[int] = None,
+        won_count: Optional[int] = None,
+        lost_count: Optional[int] = None,
+        best_pnl: Optional[float] = None,
+        worst_pnl: Optional[float] = None,
+        avg_pnl: Optional[float] = None,
     ) -> int:
         """Log a single optimization variant result."""
         opt_result = OptimizationResult(
@@ -126,6 +133,13 @@ class RunLogger:
             profit_factor=profit_factor,
             sqn=sqn,
             total_trades=total_trades,
+            long_count=long_count,
+            short_count=short_count,
+            won_count=won_count,
+            lost_count=lost_count,
+            best_pnl=best_pnl,
+            worst_pnl=worst_pnl,
+            avg_pnl=avg_pnl,
         )
         session.add(opt_result)
         session.flush()

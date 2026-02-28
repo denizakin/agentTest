@@ -33,6 +33,11 @@ class BacktestRequest(BaseModel):
     params: Optional[Dict[str, Any]] = None
     start_ts: Optional[str] = None  # ISO timestamp (inclusive)
     end_ts: Optional[str] = None    # ISO timestamp (inclusive)
+    cash: Optional[float] = None
+    commission: Optional[float] = None
+    slip_perc: Optional[float] = None
+    slip_fixed: Optional[float] = None
+    slip_open: Optional[bool] = None
 
 
 class BacktestSummary(BaseModel):
@@ -48,6 +53,7 @@ class BacktestSummary(BaseModel):
     error: Optional[str] = None
     start_ts: Optional[str] = None
     end_ts: Optional[str] = None
+    strategy_params: Optional[Dict[str, Any]] = None
 
 
 @router.get("", response_model=List[BacktestSummary])
@@ -77,24 +83,64 @@ def list_backtests(
                 error=getattr(r, "error", None),
                 start_ts=params.get("start_ts"),
                 end_ts=params.get("end_ts"),
+                strategy_params={k: v for k, v in params.items() if k not in ("strategy_id", "start_ts", "end_ts")} or None,
             )
         )
     return summaries
 
 
-@router.post("", response_model=BacktestSummary, status_code=status.HTTP_202_ACCEPTED)
+class BacktestResponse(BacktestSummary):
+    existing: bool = False  # True if this was a previously-run backtest
+
+
+@router.post("", response_model=BacktestResponse, status_code=status.HTTP_202_ACCEPTED)
 def enqueue_backtest(
     payload: BacktestRequest,
     queue: JobQueue = Depends(get_job_queue),
     session: Session = Depends(get_db),
-) -> BacktestSummary:
+) -> BacktestResponse:
     """
     Enqueue a backtest job, persist a run_header row, and return the handle.
+    If a matching backtest already exists, return it instead.
     """
     # Verify strategy exists (maps ID to name)
     strat = strategies_repo.get_by_id(session, payload.strategy_id)
     if strat is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="strategy not found")
+
+    # Build the params dict that will be stored / compared
+    built_params = {
+        "strategy_id": payload.strategy_id,
+        **(payload.params or {}),
+        **({"start_ts": payload.start_ts} if payload.start_ts else {}),
+        **({"end_ts": payload.end_ts} if payload.end_ts else {}),
+    }
+
+    # Check for existing matching backtest
+    existing = backtests_repo.find_matching(
+        session,
+        strategy_id=payload.strategy_id,
+        instrument_id=payload.instrument_id,
+        timeframe=payload.bar,
+        params=built_params,
+    )
+    if existing:
+        params = existing.params or {}
+        return BacktestResponse(
+            run_id=existing.id,
+            job_id="n/a",
+            strategy_id=existing.strategy_id or 0,
+            strategy_name=existing.strategy,
+            instrument_id=existing.instrument_id,
+            bar=existing.timeframe,
+            status=existing.status or "unknown",
+            submitted_at=existing.started_at,
+            progress=getattr(existing, "progress", 0) or 0,
+            error=getattr(existing, "error", None),
+            start_ts=params.get("start_ts"),
+            end_ts=params.get("end_ts"),
+            existing=True,
+        )
 
     run = backtests_repo.create(
         session,
@@ -104,12 +150,12 @@ def enqueue_backtest(
             instrument_id=payload.instrument_id,
             timeframe=payload.bar,
             strategy=strat.name,
-            params={
-                "strategy_id": payload.strategy_id,
-                **(payload.params or {}),
-                **({"start_ts": payload.start_ts} if payload.start_ts else {}),
-                **({"end_ts": payload.end_ts} if payload.end_ts else {}),
-            },
+            params=built_params,
+            cash=payload.cash,
+            commission=payload.commission,
+            slip_perc=payload.slip_perc,
+            slip_fixed=payload.slip_fixed,
+            slip_open=payload.slip_open,
         ),
     )
     session.commit()
@@ -117,7 +163,7 @@ def enqueue_backtest(
 
     job = Job(payload={"type": "backtest", "run_id": run.id, "data": payload.model_dump()})
     job_id = queue.enqueue(job)
-    return BacktestSummary(
+    return BacktestResponse(
         run_id=run.id,
         job_id=job_id,
         strategy_id=payload.strategy_id,
