@@ -67,6 +67,7 @@ class WfoSummary(BaseModel):
     bar: str
     status: str
     submitted_at: datetime
+    ended_at: Optional[datetime] = None
     progress: int = 0
     error: Optional[str] = None
     total_folds: int = 0
@@ -138,6 +139,7 @@ def list_walkforwards(
                 bar=r.timeframe,
                 status=r.status or "unknown",
                 submitted_at=r.started_at,
+                ended_at=r.ended_at,
                 progress=getattr(r, "progress", 0) or 0,
                 error=getattr(r, "error", None),
                 total_folds=total_folds,
@@ -161,9 +163,14 @@ def enqueue_walkforward(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="strategy not found")
 
     # Build grid spec string
+    def _fmt_num(v: float) -> str:
+        return str(int(v)) if v == int(v) else str(v)
+
     grid_parts = []
     for param_name, param_range in payload.param_ranges.items():
-        grid_parts.append(f"{param_name}={int(param_range.start)}:{int(param_range.stop)}:{int(param_range.step)}")
+        grid_parts.append(
+            f"{param_name}={_fmt_num(param_range.start)}:{_fmt_num(param_range.stop)}:{_fmt_num(param_range.step)}"
+        )
     grid_spec = ",".join(grid_parts)
 
     run = backtests_repo.create(
@@ -269,3 +276,21 @@ def get_walkforward_detail(
         end_ts=params.get("end_ts"),
         maxcpus=params.get("maxcpus"),
     )
+
+
+@router.get("/{run_id}/combined-equity")
+def get_combined_equity(run_id: int, session: Session = Depends(get_db)):
+    """Re-run WFO test folds sequentially with carry-over capital.
+
+    Returns a continuous equity curve + trades across all out-of-sample periods.
+    Each fold uses the best params found for that fold, starting with capital
+    left over from the previous fold.
+    """
+    from main_backtest import compute_wfo_combined
+    try:
+        result = compute_wfo_combined(run_id)
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Combined equity computation failed: {exc}")

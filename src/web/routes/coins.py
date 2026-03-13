@@ -20,6 +20,7 @@ class CoinSummary(BaseModel):
     volume_24h_usd: Optional[float] = None
 
 
+@router.get("", response_model=List[CoinSummary])
 @router.get("/top", response_model=List[CoinSummary])
 def list_top_coins(session: Session = Depends(get_db)) -> List[CoinSummary]:
     """

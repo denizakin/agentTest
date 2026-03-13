@@ -11,7 +11,6 @@ class EquityCurve(bt.Analyzer):
     def __init__(self):
         super().__init__()
         self.equity_data: List[Dict[str, Any]] = []
-        print("[EquityCurve] Analyzer initialized", flush=True)
 
     def prenext(self):
         """Record portfolio value during prenext phase (warming up indicators)."""
@@ -37,6 +36,4 @@ class EquityCurve(bt.Analyzer):
         })
 
     def get_analysis(self):
-        """Return the equity curve data."""
-        print(f"[EquityCurve] get_analysis called, returning {len(self.equity_data)} points", flush=True)
         return {"equity": self.equity_data}

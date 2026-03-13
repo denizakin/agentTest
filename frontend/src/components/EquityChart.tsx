@@ -11,6 +11,17 @@ type Props = {
   initialCash: number;
 };
 
+/** Reduce to at most maxPts evenly-spaced samples, always keeping first and last. */
+function downsample(points: EquityPoint[], maxPts = 2000): EquityPoint[] {
+  if (points.length <= maxPts) return points;
+  const result: EquityPoint[] = [];
+  const step = (points.length - 1) / (maxPts - 1);
+  for (let i = 0; i < maxPts; i++) {
+    result.push(points[Math.round(i * step)]);
+  }
+  return result;
+}
+
 export default function EquityChart({ equity, baselineEquity, initialCash }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<any>(null);
@@ -72,9 +83,9 @@ export default function EquityChart({ equity, baselineEquity, initialCash }: Pro
           });
         }
 
-        // Set data
+        // Set data (downsample large datasets to stay within lightweight-charts' min bar width)
         if (equity.length > 0) {
-          const mainData = equity.map((point) => ({
+          const mainData = downsample(equity).map((point) => ({
             time: Math.floor(new Date(point.ts).getTime() / 1000),
             value: point.value,
           }));
@@ -82,14 +93,18 @@ export default function EquityChart({ equity, baselineEquity, initialCash }: Pro
         }
 
         if (baselineEquity && baselineEquity.length > 0 && baselineSeriesRef.current) {
-          const baselineData = baselineEquity.map((point) => ({
+          const baselineData = downsample(baselineEquity).map((point) => ({
             time: Math.floor(new Date(point.ts).getTime() / 1000),
             value: point.value,
           }));
           baselineSeriesRef.current.setData(baselineData);
         }
 
-        chart.timeScale().fitContent();
+        // Defer fitContent so lightweight-charts has time to process the data
+        // before computing the visible range (important for large datasets)
+        requestAnimationFrame(() => {
+          if (active && chartRef.current) chartRef.current.timeScale().fitContent();
+        });
       } catch (err) {
         console.error("Failed to initialize equity chart:", err);
       }
@@ -114,7 +129,7 @@ export default function EquityChart({ equity, baselineEquity, initialCash }: Pro
 
     // Update main equity data
     if (equity.length > 0) {
-      const mainData = equity.map((point) => ({
+      const mainData = downsample(equity).map((point) => ({
         time: Math.floor(new Date(point.ts).getTime() / 1000),
         value: point.value,
       }));
@@ -123,14 +138,16 @@ export default function EquityChart({ equity, baselineEquity, initialCash }: Pro
 
     // Update baseline equity data
     if (baselineEquity && baselineEquity.length > 0 && baselineSeries) {
-      const baselineData = baselineEquity.map((point) => ({
+      const baselineData = downsample(baselineEquity).map((point) => ({
         time: Math.floor(new Date(point.ts).getTime() / 1000),
         value: point.value,
       }));
       baselineSeries.setData(baselineData);
     }
 
-    chart.timeScale().fitContent();
+    requestAnimationFrame(() => {
+      if (chartRef.current) chartRef.current.timeScale().fitContent();
+    });
   }, [equity, baselineEquity]);
 
   return <div ref={containerRef} style={{ width: "100%", height: "300px" }} />;

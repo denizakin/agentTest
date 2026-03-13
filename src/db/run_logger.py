@@ -97,7 +97,7 @@ class RunLogger:
         print(f"[log_result] Successfully saved result for label={label}", flush=True)
 
         # Save trades to run_trades table if provided
-        if trades and label == "main":  # Only save trades for main strategy, not baseline
+        if trades and label != "baseline":  # Save trades for main and WFO folds, not baseline
             self.trades_repo.save_trades(session, run_id, trades)
 
         return int(result.id)

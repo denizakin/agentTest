@@ -116,7 +116,12 @@ export default function OptimizationsPage() {
     },
   });
 
-  const handleRunBacktest = (variantParams: Record<string, unknown>) => {
+  const handleRunBacktest = (variant: { variant_params: Record<string, unknown>; backtest_run_id?: number | null }) => {
+    if (variant.backtest_run_id) {
+      // Already has a linked backtest — open it directly
+      setBacktestRunId(variant.backtest_run_id);
+      return;
+    }
     if (!detailQuery.data) return;
     const d = detailQuery.data;
     backtestMutation.mutate({
@@ -125,7 +130,7 @@ export default function OptimizationsPage() {
       bar: d.bar,
       start_ts: d.start_ts,
       end_ts: d.end_ts,
-      params: variantParams,
+      params: variant.variant_params,
       cash: d.cash,
       commission: d.commission,
       slip_perc: d.slip_perc,
@@ -340,7 +345,7 @@ export default function OptimizationsPage() {
                             size="xs"
                             variant="subtle"
                             color="blue"
-                            onClick={() => handleRunBacktest(v.variant_params)}
+                            onClick={() => handleRunBacktest(v)}
                             loading={backtestMutation.isPending}
                           >
                             ▶

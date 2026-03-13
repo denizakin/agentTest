@@ -26,6 +26,7 @@ from db.run_logger import RunLogger
 from backtest.strategies.registry import get_strategy, available_strategies
 from backtest.analyzers.trades_list import TradesList
 from backtest.analyzers.equity_curve import EquityCurve
+from db.poco.optimization_result import OptimizationResult
 
 
 def _parse_time(value: Optional[str]) -> Optional[datetime]:
@@ -318,9 +319,6 @@ def run_once(df_in: pd.DataFrame, strat_name: str, params: Dict[str, Any], *,
     # Extract trades and equity data
     trades_list = trades_list_data.get("trades", []) if isinstance(trades_list_data, dict) else []
     equity_curve = equity_curve_data.get("equity", []) if isinstance(equity_curve_data, dict) else []
-
-    print(f"[DEBUG run_once] trades_list_data type: {type(trades_list_data)}, trades count: {len(trades_list)}")
-    print(f"[DEBUG run_once] equity_curve_data type: {type(equity_curve_data)}, equity count: {len(equity_curve)}")
 
     return float(end_val), metrics, figs, trades_list, equity_curve
 
@@ -669,12 +667,26 @@ def main() -> int:
     )
 
 
-def _parse_grid(grid: str) -> Dict[str, List[int]]:
-    """Parse grid string like 'fast=5:30:1,slow=10:60:5' into dict of name -> list of ints.
+def _parse_grid(grid: str) -> Dict[str, List[Any]]:
+    """Parse grid string like 'fast=5:30:1,slow=10:60:5,invest=0.1:0.9:0.1'.
 
-    Only integer ranges are supported. Inclusive stop is applied (like Python range with stop+step).
+    Supports both integer and float ranges. Inclusive stop.
     """
-    result: Dict[str, List[int]] = {}
+    def _is_number(s: str) -> bool:
+        try:
+            float(s.lstrip('-'))
+            return True
+        except ValueError:
+            return False
+
+    def _to_num(s: str):
+        try:
+            i = int(s)
+            return i
+        except ValueError:
+            return float(s)
+
+    result: Dict[str, List[Any]] = {}
     if not grid:
         return result
     for item in grid.split(','):
@@ -684,16 +696,26 @@ def _parse_grid(grid: str) -> Dict[str, List[int]]:
         name, rng = item.split('=', 1)
         name = name.strip()
         parts = [p.strip() for p in rng.split(':')]
-        if len(parts) == 3 and all(p.lstrip('-').isdigit() for p in parts):
-            start, stop, step = map(int, parts)
+        if len(parts) == 3 and all(_is_number(p) for p in parts):
+            start, stop, step = _to_num(parts[0]), _to_num(parts[1]), _to_num(parts[2])
             if step == 0:
                 continue
-            vals = list(range(start, stop + (1 if (stop - start) * step >= 0 else -1), step))
-            result[name] = vals
+            # Float range: use round to avoid float accumulation errors
+            if any(isinstance(v, float) for v in (start, stop, step)):
+                vals = []
+                n = round((stop - start) / step)
+                for i in range(n + 1):
+                    v = round(start + i * step, 10)
+                    if (step > 0 and v <= stop + 1e-9) or (step < 0 and v >= stop - 1e-9):
+                        vals.append(v)
+                result[name] = vals
+            else:
+                vals = list(range(int(start), int(stop) + (1 if (stop - start) * step >= 0 else -1), int(step)))
+                result[name] = vals
         else:
-            # fallback: single int
+            # Single value fallback
             try:
-                result[name] = [int(rng)]
+                result[name] = [_to_num(rng)]
             except ValueError:
                 pass
     return result
@@ -716,10 +738,16 @@ def _pick_best_by_objective(rows: List[Dict[str, Any]], objective: str) -> Optio
     def score(row: Dict[str, Any]) -> float:
         val = row.get(key)
         try:
-            return float(val)
+            f = float(val)
+            if f != f:  # NaN check
+                return float("-inf")
+            return f
         except Exception:
             return float("-inf")
-    return max(rows, key=score)
+    valid = [r for r in rows if score(r) > float("-inf")]
+    if not valid:
+        return rows[0]  # fallback: return first row if all scores are invalid
+    return max(valid, key=score)
 
 
 def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str], cash: float, commission: float,
@@ -909,9 +937,10 @@ def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str],
                 'best_pnl': best_pnl,
                 'worst_pnl': worst_pnl,
                 'avg_pnl': avg_pnl,
+                'opt_result_id': None,  # filled after DB insert
             }
             rows.append(row)
-            logger.log_optimization_variant(
+            opt_result_id = logger.log_optimization_variant(
                 session=s,
                 run_id=run_id,
                 variant_params=p_dict,
@@ -930,6 +959,7 @@ def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str],
                 worst_pnl=float(worst_pnl) if worst_pnl is not None else None,
                 avg_pnl=float(avg_pnl) if avg_pnl is not None else None,
             )
+            row['opt_result_id'] = opt_result_id
             # Progress: 70-90% proportional to variants processed
             if total_flat > 0:
                 variant_pct = 0.70 + 0.20 * ((idx_strat + 1) / total_flat)
@@ -938,6 +968,55 @@ def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str],
         print(f"Saved {len(rows)} optimization variants to DB (run_id={run_id})")
         _progress(0.92)
         logger.complete_run(s, run_id)
+
+    # ── Auto-backtest top-5 variants ────────────────────────────────────
+    if rows:
+        top5 = sorted(rows, key=lambda r: (r['final'] if r['final'] is not None else float('-inf')), reverse=True)[:5]
+        print(f"\nRunning full backtest for top {len(top5)} variants...")
+        for rank, variant in enumerate(top5, 1):
+            vparams = variant['params']
+            print(f"  Auto-backtest #{rank}: params={vparams}")
+            try:
+                end_val, metrics, _figs, trades, equity = run_once(
+                    df, strategy_name, vparams,
+                    cash=cash, commission=commission, coc=True,
+                    use_sizer=False, stake=1,
+                    slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=slip_open,
+                    do_plot=False, verbose=False,
+                )
+                with db.session_scope() as s:
+                    bt_run_id = logger.start_run(
+                        session=s,
+                        run_type="backtest",
+                        instrument_id=inst,
+                        timeframe=tf,
+                        strategy=strategy_name,
+                        params=vparams,
+                        cash=cash,
+                        commission=commission,
+                        slip_perc=slip_perc,
+                        slip_fixed=slip_fixed,
+                        slip_open=slip_open,
+                        notes=f"auto from opt#{run_id}",
+                    )
+                    logger.log_result(
+                        session=s,
+                        run_id=bt_run_id,
+                        label="main",
+                        params=vparams,
+                        metrics=metrics,
+                        trades=trades,
+                        equity=equity,
+                    )
+                    logger.complete_run(s, bt_run_id)
+                    # Link optimization variant to its backtest
+                    opt_row = s.get(OptimizationResult, variant['opt_result_id'])
+                    if opt_row:
+                        opt_row.backtest_run_id = bt_run_id
+                print(f"  Auto-backtest #{rank} saved as run_id={bt_run_id}")
+            except Exception as exc:
+                print(f"  Auto-backtest #{rank} failed: {exc}")
+            _progress(0.92 + rank * 0.016)  # 0.92 -> 1.0 across 5
 
     if not rows:
         print("No optimization results collected (possibly due to constraint or failures).")
@@ -1098,11 +1177,11 @@ def run_wfo(inst: str, tf: str, since: Optional[str], until: Optional[str], cash
             cerebro.optstrategy(StrategyCls, **grid)
             results = cerebro.run(maxcpus=int(maxcpus))
 
-            flat: List[bt.Strategy] = []
+            flat: List[Any] = []
             for res in results:
                 if isinstance(res, (list, tuple)) and res:
-                    flat.append(res[0])
-                elif isinstance(res, bt.Strategy):
+                    flat.extend(res)
+                else:
                     flat.append(res)
 
             train_rows: List[Dict[str, Any]] = []
@@ -1141,7 +1220,10 @@ def run_wfo(inst: str, tf: str, since: Optional[str], until: Optional[str], cash
                 win_rate = (won_total / total_closed * 100.0) if total_closed else None
                 train_rows.append({
                     "params": p_dict,
-                    "final": float(strat.broker.getvalue()) if hasattr(strat, "broker") else None,
+                    "final": (
+                        float(strat.broker.getvalue()) if hasattr(strat, "broker")
+                        else (cash + float((((ta.get("pnl") or {}).get("net") or {}).get("total") or 0)))
+                    ),
                     "sharpe": s_an.get("sharperatio") if isinstance(s_an, dict) else None,
                     "maxdd": maxdd,
                     "winrate": win_rate,
@@ -1154,7 +1236,7 @@ def run_wfo(inst: str, tf: str, since: Optional[str], until: Optional[str], cash
                 continue
 
             # Run best params on test set (single run, no plotting)
-            test_end_val, test_metrics, _, _, _ = run_once(
+            test_end_val, test_metrics, _, test_trades, test_equity = run_once(
                 test_df, strategy_name, best["params"],
                 cash=cash, commission=commission, coc=True,  # keep coc default true for consistency
                 use_sizer=False, stake=1,
@@ -1181,6 +1263,8 @@ def run_wfo(inst: str, tf: str, since: Optional[str], until: Optional[str], cash
                 params=best["params"],
                 metrics=test_metrics,
                 plot_path=None,
+                trades=test_trades,
+                equity=test_equity,
             )
             logger.log_wfo_fold(
                 session=s,
@@ -1232,6 +1316,131 @@ def run_wfo(inst: str, tf: str, since: Optional[str], until: Optional[str], cash
         )
 
     return 0
+
+
+def compute_wfo_combined(run_id: int) -> Dict[str, Any]:
+    """Re-run WFO test folds sequentially with carry-over capital.
+
+    Returns a dict with 'equity', 'trades', 'final_value', 'initial_cash'.
+    Each fold starts with the capital left over from the previous fold, producing
+    a single continuous equity curve across all out-of-sample periods.
+    """
+    from db.backtests_repo import BacktestsRepo
+    from db.wfo_folds_repo import WfoFoldsRepo as _WfoFoldsRepo
+
+    load_env_file()
+    db = DbConn()
+
+    with db.session_scope() as sess:
+        run = BacktestsRepo().get_by_id(sess, run_id)
+        if run is None:
+            raise ValueError(f"Run {run_id} not found")
+        if run.run_type != "wfo":
+            raise ValueError(f"Run {run_id} is not a WFO run")
+
+        raw_folds = _WfoFoldsRepo().list_by_run(sess, run_id)
+        if not raw_folds:
+            raise ValueError(f"No folds found for run {run_id}")
+
+        inst = run.instrument_id
+        tf = run.timeframe
+        cash = float(run.cash or 10000)
+        commission = float(run.commission or 0.001)
+        slip_perc = float(run.slip_perc or 0.0)
+        slip_fixed = float(run.slip_fixed or 0.0)
+        strategy_name = run.strategy
+
+        # Freeze fold data before session closes
+        fold_data = [
+            {
+                "test_start": f.test_start,
+                "test_end": f.test_end,
+                "params": dict(f.params) if f.params else None,
+                "fold_index": f.fold_index,
+            }
+            for f in raw_folds
+            if f.params
+        ]
+
+    if not fold_data:
+        raise ValueError("No folds with params found")
+
+    # Load all candle data covering the combined test window in one query
+    all_starts = [fd["test_start"] for fd in fold_data]
+    all_ends = [fd["test_end"] for fd in fold_data]
+    df = _fetch_df(db, inst, tf, min(all_starts), max(all_ends))
+    if df.empty:
+        raise ValueError("No candle data found for test periods")
+
+    current_cash = cash
+    combined_equity: List[Dict[str, Any]] = []
+    combined_trades: List[Dict[str, Any]] = []
+
+    print(f"[combined_equity] df rows={len(df)}, df ts range: {df['ts'].iloc[0]} → {df['ts'].iloc[-1]}", flush=True)
+    print(f"[combined_equity] folds to process: {len(fold_data)}", flush=True)
+
+    for fd in fold_data:
+        # df["ts"] is tz-naive; fold timestamps may be tz-aware — normalize
+        ts_start = fd["test_start"].replace(tzinfo=None) if getattr(fd["test_start"], "tzinfo", None) else fd["test_start"]
+        ts_end = fd["test_end"].replace(tzinfo=None) if getattr(fd["test_end"], "tzinfo", None) else fd["test_end"]
+        test_df = df[(df["ts"] >= ts_start) & (df["ts"] < ts_end)].copy()
+        print(f"[combined_equity] fold #{fd['fold_index']}: ts_start={ts_start} ts_end={ts_end} test_df={len(test_df)} rows", flush=True)
+        if test_df.empty:
+            continue
+
+        # Suppress strategy per-bar print output (printlog defaults to True
+        # but fold params may use a different key, flooding the terminal)
+        silent_params = {**fd["params"], "printlog": False}
+        end_val, _metrics, _, trades, equity = run_once(
+            test_df, strategy_name, silent_params,
+            cash=current_cash, commission=commission, coc=True,
+            use_sizer=False, stake=1,
+            slip_perc=slip_perc, slip_fixed=slip_fixed, slip_open=True,
+            do_plot=False, verbose=False,
+        )
+        print(f"[combined_equity] fold #{fd['fold_index']}: end_val={end_val:.2f} equity_pts={len(equity)}", flush=True)
+        combined_equity.extend(equity)
+        combined_trades.extend(trades)
+        current_cash = end_val
+
+    # Deduplicate and sort by timestamp (lightweight-charts requires strictly ascending)
+    seen_ts: set = set()
+    deduped_equity: List[Dict[str, Any]] = []
+    for pt in combined_equity:
+        if pt["ts"] not in seen_ts:
+            seen_ts.add(pt["ts"])
+            deduped_equity.append(pt)
+    deduped_equity.sort(key=lambda p: p["ts"])
+
+    first_ts = deduped_equity[0]["ts"] if deduped_equity else "N/A"
+    last_ts = deduped_equity[-1]["ts"] if deduped_equity else "N/A"
+    print(f"[combined_equity] DONE: raw_pts={len(combined_equity)} deduped_pts={len(deduped_equity)} first_ts={first_ts} last_ts={last_ts}", flush=True)
+
+    # Build buy & hold baseline: price scaled to initial cash, over the same test periods
+    baseline_equity: List[Dict[str, Any]] = []
+    all_test_dfs = []
+    for fd in fold_data:
+        ts_start = fd["test_start"].replace(tzinfo=None) if getattr(fd["test_start"], "tzinfo", None) else fd["test_start"]
+        ts_end = fd["test_end"].replace(tzinfo=None) if getattr(fd["test_end"], "tzinfo", None) else fd["test_end"]
+        slice_df = df[(df["ts"] >= ts_start) & (df["ts"] < ts_end)]
+        if not slice_df.empty:
+            all_test_dfs.append(slice_df)
+    if all_test_dfs:
+        bh_df = pd.concat(all_test_dfs).drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+        first_price = float(bh_df["close"].iloc[0])
+        bh_values = (cash * bh_df["close"] / first_price).tolist()
+        baseline_equity = [
+            {"ts": t.isoformat() + "+00:00", "value": v}
+            for t, v in zip(bh_df["ts"], bh_values)
+        ]
+
+    return {
+        "equity": deduped_equity,
+        "baseline_equity": baseline_equity,
+        "trades": combined_trades,
+        "final_value": current_cash,
+        "initial_cash": cash,
+    }
 
 
 if __name__ == "__main__":

@@ -88,6 +88,7 @@ class OptimizationVariant(BaseModel):
     best_pnl: Optional[float] = None
     worst_pnl: Optional[float] = None
     avg_pnl: Optional[float] = None
+    backtest_run_id: Optional[int] = None
 
 
 class OptimizationDetail(BaseModel):
@@ -162,10 +163,14 @@ def enqueue_optimization(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="strategy not found")
 
     # Build grid spec string: "param1=start:stop:step,param2=start:stop:step"
-    # _parse_grid in main_backtest only supports integer ranges, so cast to int
+    def _fmt_num(v: float) -> str:
+        return str(int(v)) if v == int(v) else str(v)
+
     grid_parts = []
     for param_name, param_range in payload.param_ranges.items():
-        grid_parts.append(f"{param_name}={int(param_range.start)}:{int(param_range.stop)}:{int(param_range.step)}")
+        grid_parts.append(
+            f"{param_name}={_fmt_num(param_range.start)}:{_fmt_num(param_range.stop)}:{_fmt_num(param_range.step)}"
+        )
     grid_spec = ",".join(grid_parts)
 
     # Create run header

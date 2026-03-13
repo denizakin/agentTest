@@ -26,4 +26,5 @@ class OptimizationResult(Base):
     best_pnl = Column(Numeric(30, 8), nullable=True)
     worst_pnl = Column(Numeric(30, 8), nullable=True)
     avg_pnl = Column(Numeric(30, 8), nullable=True)
+    backtest_run_id = Column(Integer, ForeignKey("run_headers.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")

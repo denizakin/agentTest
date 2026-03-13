@@ -146,6 +146,7 @@ export type OptimizationVariant = {
   best_pnl?: number | null;
   worst_pnl?: number | null;
   avg_pnl?: number | null;
+  backtest_run_id?: number | null;
 };
 
 export type OptimizationDetail = {
@@ -198,6 +199,7 @@ export type WfoSummary = {
   bar: string;
   status: string;
   submitted_at: string;
+  ended_at?: string | null;
   progress: number;
   error?: string | null;
   total_folds: number;

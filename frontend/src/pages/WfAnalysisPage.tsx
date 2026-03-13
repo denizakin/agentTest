@@ -4,6 +4,7 @@ import { Button, Group, Stack, Title, Table, Badge, Modal, Text, Loader, Progres
 import { notifications } from "@mantine/notifications";
 import type { WfoSummary, WfoDetail, CreateWfoRequest, Strategy, CoinSummary } from "../api/types";
 import CreateWfoModal from "../components/CreateWfoModal";
+import EquityChart from "../components/EquityChart";
 
 const TH = ({ tip, children }: { tip: string; children: React.ReactNode }) => (
   <Tooltip label={tip} withArrow position="top" multiline w={260}>
@@ -14,6 +15,7 @@ const TH = ({ tip, children }: { tip: string; children: React.ReactNode }) => (
 export default function WfAnalysisPage() {
   const [createModalOpened, setCreateModalOpened] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
+  const [combinedEquityRunId, setCombinedEquityRunId] = useState<number | null>(null);
   const qc = useQueryClient();
 
   // List WFO runs
@@ -63,6 +65,21 @@ export default function WfAnalysisPage() {
     },
   });
 
+  // Combined equity query (lazy — only runs when combinedEquityRunId is set)
+  const combinedEquityQuery = useQuery<{ equity: {ts: string; value: number}[]; baseline_equity: {ts: string; value: number}[]; trades: unknown[]; final_value: number; initial_cash: number }>({
+    queryKey: ["wfo-combined-equity", combinedEquityRunId],
+    queryFn: async () => {
+      const res = await fetch(`/api/walkforwards/${combinedEquityRunId}/combined-equity`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: "Unknown error" }));
+        throw new Error(err.detail || "Failed to compute combined equity");
+      }
+      return res.json();
+    },
+    enabled: !!combinedEquityRunId,
+    staleTime: Infinity,
+  });
+
   // Create mutation
   const createMutation = useMutation({
     mutationFn: async (payload: CreateWfoRequest) => {
@@ -101,6 +118,13 @@ export default function WfAnalysisPage() {
   const fmtDollar = (v: number | null | undefined) => (v != null ? `$${v.toFixed(2)}` : "—");
   const fmtPct = (v: number | null | undefined) => (v != null ? `${v.toFixed(2)}%` : "—");
   const fmtDate = (s: string) => new Date(s).toLocaleDateString();
+  const fmtElapsed = (start?: string | null, end?: string | null) => {
+    if (!start || !end) return "—";
+    const secs = Math.round((new Date(end).getTime() - new Date(start).getTime()) / 1000);
+    if (secs < 60) return `${secs}s`;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+    return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
+  };
 
   return (
     <Stack gap="md" style={{ height: "calc(100vh - 100px)", display: "flex", flexDirection: "column" }}>
@@ -138,6 +162,7 @@ export default function WfAnalysisPage() {
                 <Table.Th>Progress</Table.Th>
                 <Table.Th>Folds</Table.Th>
                 <Table.Th>Submitted</Table.Th>
+                <Table.Th>Duration</Table.Th>
                 <Table.Th>Actions</Table.Th>
               </Table.Tr>
             </Table.Thead>
@@ -156,6 +181,7 @@ export default function WfAnalysisPage() {
                   <Table.Td><Progress value={wfo.progress} size="sm" style={{ width: "80px" }} /></Table.Td>
                   <Table.Td>{wfo.total_folds || "—"}</Table.Td>
                   <Table.Td>{new Date(wfo.submitted_at).toLocaleString()}</Table.Td>
+                  <Table.Td>{fmtElapsed(wfo.submitted_at, wfo.ended_at)}</Table.Td>
                   <Table.Td>
                     <Button size="xs" variant="light" onClick={() => setSelectedRunId(wfo.run_id)}>
                       View Results
@@ -181,7 +207,7 @@ export default function WfAnalysisPage() {
       {/* WFO Detail Modal */}
       <Modal
         opened={!!selectedRunId}
-        onClose={() => setSelectedRunId(null)}
+        onClose={() => { setSelectedRunId(null); setCombinedEquityRunId(null); }}
         title={`Walk-Forward Results - Run #${selectedRunId}`}
         size="95vw"
         styles={{ body: { padding: "12px 16px" } }}
@@ -213,6 +239,18 @@ export default function WfAnalysisPage() {
                   : "All available data"}
               </Text>
               <Text size="sm"><Text span c="dimmed">Max CPUs:</Text> {detailQuery.data.maxcpus ?? 1}</Text>
+              <Text size="sm">
+                <Text span c="dimmed">Started:</Text>{" "}
+                {detailQuery.data.submitted_at ? new Date(detailQuery.data.submitted_at).toLocaleString() : "—"}
+              </Text>
+              <Text size="sm">
+                <Text span c="dimmed">Ended:</Text>{" "}
+                {detailQuery.data.ended_at ? new Date(detailQuery.data.ended_at).toLocaleString() : "—"}
+              </Text>
+              <Text size="sm">
+                <Text span c="dimmed">Duration:</Text>{" "}
+                {fmtElapsed(detailQuery.data.submitted_at, detailQuery.data.ended_at)}
+              </Text>
             </div>
 
             <Group gap="sm">
@@ -222,7 +260,55 @@ export default function WfAnalysisPage() {
                 <Text size="xs" c="dimmed">| Constraint: <code>{detailQuery.data.constraint}</code></Text>
               )}
               {detailQuery.data.error && <Text size="xs" c="red">| {detailQuery.data.error}</Text>}
+              {detailQuery.data.status === "succeeded" && detailQuery.data.total_folds > 0 && (
+                <Button
+                  size="xs"
+                  variant="light"
+                  color="teal"
+                  onClick={() => {
+                    if (combinedEquityRunId === selectedRunId) {
+                      setCombinedEquityRunId(null);
+                    } else {
+                      qc.removeQueries({ queryKey: ["wfo-combined-equity", selectedRunId] });
+                      setCombinedEquityRunId(selectedRunId);
+                    }
+                  }}
+                >
+                  {combinedEquityRunId === selectedRunId ? "Hide Combined Equity" : "Combined Equity"}
+                </Button>
+              )}
             </Group>
+
+            {/* Combined equity chart */}
+            {combinedEquityRunId === selectedRunId && (
+              <div style={{ background: "var(--mantine-color-dark-6, #f8f9fa)", padding: "8px 12px", borderRadius: "6px" }}>
+                <Text size="sm" fw={600} mb={6}>Combined Out-of-Sample Equity Curve</Text>
+                {combinedEquityQuery.isFetching && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "20px 0" }}>
+                    <Loader size="sm" />
+                    <Text size="xs" c="dimmed">Running {detailQuery.data.total_folds} test folds sequentially…</Text>
+                  </div>
+                )}
+                {combinedEquityQuery.error && (
+                  <Text size="xs" c="red">{(combinedEquityQuery.error as Error).message}</Text>
+                )}
+                {combinedEquityQuery.data && (
+                  <>
+                    <Group gap="xl" mb={6}>
+                      <Text size="xs"><Text span c="dimmed">Initial:</Text> {fmtDollar(combinedEquityQuery.data.initial_cash)}</Text>
+                      <Text size="xs"><Text span c="dimmed">Final:</Text> <Text span fw={700} c={combinedEquityQuery.data.final_value >= combinedEquityQuery.data.initial_cash ? "green" : "red"}>{fmtDollar(combinedEquityQuery.data.final_value)}</Text></Text>
+                      <Text size="xs"><Text span c="dimmed">Return:</Text> {fmt((combinedEquityQuery.data.final_value / combinedEquityQuery.data.initial_cash - 1) * 100)}%</Text>
+                    </Group>
+                    <EquityChart key={combinedEquityQuery.data.equity.length} equity={combinedEquityQuery.data.equity} baselineEquity={combinedEquityQuery.data.baseline_equity} initialCash={combinedEquityQuery.data.initial_cash} />
+                    {combinedEquityQuery.data.equity.length > 0 && (
+                      <Text size="xs" c="dimmed" mt={4}>
+                        {combinedEquityQuery.data.equity.length} pts &nbsp;|&nbsp; {combinedEquityQuery.data.equity[0].ts.slice(0, 10)} → {combinedEquityQuery.data.equity[combinedEquityQuery.data.equity.length - 1].ts.slice(0, 10)}
+                      </Text>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
 
             {/* OOS aggregate metrics */}
             {detailQuery.data.folds.length > 0 && (() => {
