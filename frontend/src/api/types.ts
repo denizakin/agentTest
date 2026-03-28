@@ -1,3 +1,26 @@
+export type Account = {
+  id: number;
+  name: string;
+  description?: string | null;
+  platform: "binance" | "okx";
+  is_demo: boolean;
+  api_key?: string | null;
+  secret_key?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CreateAccountRequest = {
+  name: string;
+  platform: "binance" | "okx";
+  description?: string;
+  is_demo?: boolean;
+  api_key?: string;
+  secret_key?: string;
+};
+
+export type UpdateAccountRequest = Partial<CreateAccountRequest>;
+
 export type CoinSummary = {
   instrument_id: string;
   name?: string | null;
@@ -247,6 +270,57 @@ export type WfoDetail = {
   start_ts?: string | null;
   end_ts?: string | null;
   maxcpus?: number | null;
+};
+
+// ── Trade Definitions ──────────────────────────────────────────────────
+
+export type TradeDefinitionStatus = "active" | "paused" | "stopped";
+
+export type TradeDefinition = {
+  id: number;
+  strategy_id?: number | null;
+  account_id?: number | null;
+  strategy_name: string;
+  instrument_id: string;
+  timeframe: string;
+  status: TradeDefinitionStatus;
+  params?: Record<string, unknown> | null;
+  notes?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CreateTradeDefinitionRequest = {
+  strategy_id: number;
+  instrument_id: string;
+  timeframe: string;
+  status?: TradeDefinitionStatus;
+  params?: Record<string, unknown>;
+  notes?: string;
+  account_id?: number;
+};
+
+export type MonteCarloResult = {
+  actual: number[];
+  p5: number[];
+  p25: number[];
+  p50: number[];
+  p75: number[];
+  p95: number[];
+  n_trades: number;
+  n_sims: number;
+  initial_cash: number;
+  // Max drawdown distribution (path-dependent — the only meaningful per-sim metric)
+  dd_actual: number;   // actual run's max drawdown %
+  dd_p5: number;       // 5th pct = best 5% scenarios
+  dd_p25: number;
+  dd_p50: number;      // median scenario drawdown
+  dd_p75: number;
+  dd_p95: number;      // 95th pct = worst 5% scenarios
+  // Real trade exit Unix timestamps (seconds) — chart uses actual dates when present
+  timestamps?: number[] | null;
+  // Full equity curve for WFO MC — [[unix_ts_seconds, value], ...] (bar-level resolution)
+  equity_curve?: [number, number][] | null;
 };
 
 export type CreateWfoRequest = {

@@ -1,5 +1,5 @@
 import { Stack, NavLink } from "@mantine/core";
-import { IconActivity, IconChartLine, IconChartPie, IconHome2, IconListCheck, IconRocket, IconSettings } from "@tabler/icons-react";
+import { IconActivity, IconChartLine, IconChartPie, IconHome2, IconKey, IconRocket, IconSettings, IconTrendingUp } from "@tabler/icons-react";
 import { useLocation, Link } from "react-router-dom";
 
 const nav = [
@@ -8,7 +8,9 @@ const nav = [
   { label: "Backtests", to: "/backtests", icon: IconRocket },
   { label: "Optimizations", to: "/optimizations", icon: IconSettings },
   { label: "WF Analysis", to: "/wf", icon: IconChartPie },
+  { label: "Trades", to: "/trades", icon: IconTrendingUp },
   { label: "Activity", to: "/activity", icon: IconActivity },
+  { label: "Accounts", to: "/accounts", icon: IconKey },
 ];
 
 export default function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {

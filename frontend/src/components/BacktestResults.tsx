@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { RunResultItem, TradeItem } from "../api/types";
+import type { RunResultItem, TradeItem, MonteCarloResult } from "../api/types";
 import EquityChart from "./EquityChart";
+import MonteCarloChart from "./MonteCarloChart";
 import TradesTable from "./TradesTable";
 import type { BacktestChartHandle } from "./BacktestChart";
 
@@ -12,12 +13,9 @@ type Props = {
 };
 
 export default function BacktestResults({ results, runId, chartRef }: Props) {
-  const [activeTab, setActiveTab] = useState<"metrics" | "trades">("metrics");
+  const [activeTab, setActiveTab] = useState<"metrics" | "trades" | "montecarlo">("metrics");
 
   const handleTradeClick = (entryTime: string, exitTime: string) => {
-    // Don't switch tabs, just zoom the chart
-    // Note: Chart is in metrics tab, so if user is in trades tab, they won't see the zoom
-    // But this preserves their current view as requested
     chartRef?.current?.zoomToTrade(entryTime, exitTime);
   };
 
@@ -25,14 +23,23 @@ export default function BacktestResults({ results, runId, chartRef }: Props) {
   const tradesQuery = useQuery<TradeItem[]>({
     queryKey: ["backtest-trades", runId],
     queryFn: async () => {
-      const res = await fetch(`/api/backtests/${runId}/trades`, {
-        cache: 'no-cache',  // Disable browser cache for trades
-      });
+      const res = await fetch(`/api/backtests/${runId}/trades`, { cache: "no-cache" });
       if (!res.ok) throw new Error("Failed to fetch trades");
       return res.json();
     },
-    staleTime: 0,  // Always refetch when query is used
-    cacheTime: 0,  // Don't keep in cache
+    staleTime: 0,
+    gcTime: 0,
+  });
+
+  const mcQuery = useQuery<MonteCarloResult>({
+    queryKey: ["backtest-monte-carlo", runId],
+    queryFn: async () => {
+      const res = await fetch(`/api/backtests/${runId}/monte-carlo`);
+      if (!res.ok) throw new Error("Failed to fetch Monte Carlo");
+      return res.json();
+    },
+    enabled: activeTab === "montecarlo",
+    staleTime: Infinity,
   });
 
   // Find main and baseline results
@@ -93,13 +100,28 @@ export default function BacktestResults({ results, runId, chartRef }: Props) {
               background: activeTab === "trades" ? "#1f2937" : "transparent",
               border: "none",
               borderBottom: activeTab === "trades" ? "2px solid #3b82f6" : "2px solid transparent",
-              color: activeTab === "trades" ? "#9ca3af" : "#9ca3af",
+              color: activeTab === "trades" ? "#fff" : "#9ca3af",
               cursor: "pointer",
               fontSize: "14px",
               fontWeight: 500,
             }}
           >
             Trades
+          </button>
+          <button
+            onClick={() => setActiveTab("montecarlo")}
+            style={{
+              padding: "10px 20px",
+              background: activeTab === "montecarlo" ? "#1f2937" : "transparent",
+              border: "none",
+              borderBottom: activeTab === "montecarlo" ? "2px solid #3b82f6" : "2px solid transparent",
+              color: activeTab === "montecarlo" ? "#fff" : "#9ca3af",
+              cursor: "pointer",
+              fontSize: "14px",
+              fontWeight: 500,
+            }}
+          >
+            Monte Carlo
           </button>
         </div>
       </div>
@@ -225,6 +247,60 @@ export default function BacktestResults({ results, runId, chartRef }: Props) {
             </div>
           )}
           {tradesQuery.data && <TradesTable trades={tradesQuery.data} onTradeClick={handleTradeClick} />}
+        </div>
+      )}
+
+      {activeTab === "montecarlo" && (
+        <div>
+          {mcQuery.isLoading && (
+            <div style={{ textAlign: "center", padding: "40px", color: "#9ca3af" }}>
+              Running Monte Carlo simulation...
+            </div>
+          )}
+          {mcQuery.isError && (
+            <div style={{ textAlign: "center", padding: "40px", color: "#f87171" }}>
+              Failed to run Monte Carlo simulation
+            </div>
+          )}
+          {mcQuery.data && (
+            <div style={{ background: "#1f2937", borderRadius: "8px", padding: "20px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "15px" }}>
+                <div style={{ fontSize: "16px", color: "#fff", fontWeight: 500 }}>
+                  Monte Carlo — Trade Sequence Shuffling
+                </div>
+                <div style={{ fontSize: "12px", color: "#9ca3af" }}>
+                  {mcQuery.data.n_sims} simulations · {mcQuery.data.n_trades} trades
+                </div>
+              </div>
+              <MonteCarloChart key={runId} data={mcQuery.data} />
+              <div style={{ marginTop: "12px", display: "flex", gap: "20px", fontSize: "12px" }}>
+                <span style={{ color: "#3b82f6" }}>— Actual</span>
+                <span style={{ color: "#f59e0b" }}>— Median (P50)</span>
+                <span style={{ color: "#4b5563" }}>— P25/P75</span>
+                <span style={{ color: "#374151" }}>— P5/P95</span>
+              </div>
+              <div style={{ marginTop: "10px", fontSize: "12px", color: "#6b7280" }}>
+                Max Drawdown distribution across {mcQuery.data.n_sims} shuffled simulations — lower is better
+              </div>
+              <div style={{ marginTop: "8px", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: "10px" }}>
+                {[
+                  { label: "Best 5% (P5 DD)", val: mcQuery.data.dd_p5 },
+                  { label: "P25 DD", val: mcQuery.data.dd_p25 },
+                  { label: "Median DD", val: mcQuery.data.dd_p50 },
+                  { label: "P75 DD", val: mcQuery.data.dd_p75 },
+                  { label: "Worst 5% (P95 DD)", val: mcQuery.data.dd_p95 },
+                  { label: "Actual Max DD", val: mcQuery.data.dd_actual },
+                ].map(({ label, val }) => (
+                  <div key={label} style={{ background: "#111827", borderRadius: "6px", padding: "10px", border: "1px solid #374151" }}>
+                    <div style={{ fontSize: "11px", color: "#9ca3af", marginBottom: "4px" }}>{label}</div>
+                    <div style={{ fontSize: "16px", fontWeight: "bold", color: val < 10 ? "#4ade80" : val < 20 ? "#f59e0b" : "#f87171" }}>
+                      {val.toFixed(1)}%
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

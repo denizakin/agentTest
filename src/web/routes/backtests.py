@@ -267,6 +267,52 @@ def list_backtest_trades(run_id: int, session: Session = Depends(get_db)) -> Lis
     ]
 
 
+# ---- Monte Carlo endpoint ----
+
+class MonteCarloResponse(BaseModel):
+    actual: List[float]
+    p5: List[float]
+    p25: List[float]
+    p50: List[float]
+    p75: List[float]
+    p95: List[float]
+    n_trades: int
+    n_sims: int
+    initial_cash: float
+    dd_actual: float
+    dd_p5: float
+    dd_p25: float
+    dd_p50: float
+    dd_p75: float
+    dd_p95: float
+    timestamps: Optional[List[int]] = None
+
+
+@router.get("/{run_id}/monte-carlo", response_model=MonteCarloResponse)
+def get_backtest_monte_carlo(
+    run_id: int,
+    n_sims: int = 500,
+    session: Session = Depends(get_db),
+) -> MonteCarloResponse:
+    run = backtests_repo.get(session, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="backtest not found")
+
+    all_trades = runtrades_repo.list_trades(session, run_id)
+    valid_trades = [t for t in all_trades if t.exit_ts]
+    pnls = [float(t.pnl) for t in valid_trades]
+    timestamps = [int(t.exit_ts.timestamp()) for t in valid_trades]
+
+    initial_cash = float(run.cash) if run.cash else 10000.0
+
+    from backtest.monte_carlo import run_monte_carlo
+    result = run_monte_carlo(
+        pnls, initial_cash, n_sims=n_sims,
+        timestamps=timestamps if timestamps else None,
+    )
+    return MonteCarloResponse(initial_cash=initial_cash, **result)
+
+
 # ---- Chart endpoint ----
 class ChartCandle(BaseModel):
     time: str  # ISO timestamp

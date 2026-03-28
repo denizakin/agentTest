@@ -8,6 +8,8 @@ import BacktestsPage from "./pages/BacktestsPage";
 import OptimizationsPage from "./pages/OptimizationsPage";
 import WfAnalysisPage from "./pages/WfAnalysisPage";
 import ActivityPage from "./pages/ActivityPage";
+import TradesPage from "./pages/TradesPage";
+import AccountsPage from "./pages/AccountsPage";
 
 function AppLayout() {
   const [opened, { toggle }] = useDisclosure(true);
@@ -58,6 +60,8 @@ export default function App() {
         <Route path="/optimizations" element={<OptimizationsPage />} />
         <Route path="/wf" element={<WfAnalysisPage />} />
         <Route path="/activity" element={<ActivityPage />} />
+        <Route path="/trades" element={<TradesPage />} />
+        <Route path="/accounts" element={<AccountsPage />} />
       </Route>
     </Routes>
   );

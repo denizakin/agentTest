@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from db.backtests_repo import BacktestsRepo, NewBacktest
+from db.run_trades_repo import RunTradesRepo
 from db.strategies_repo import StrategiesRepo
 from db.wfo_folds_repo import WfoFoldsRepo
 from taskqueue.types import Job, JobQueue
@@ -17,6 +18,7 @@ router = APIRouter(prefix="/walkforwards", tags=["walkforwards"])
 backtests_repo = BacktestsRepo()
 strategies_repo = StrategiesRepo()
 wfo_folds_repo = WfoFoldsRepo()
+runtrades_repo = RunTradesRepo()
 
 
 def _safe_float(val: Any) -> Optional[float]:
@@ -276,6 +278,93 @@ def get_walkforward_detail(
         end_ts=params.get("end_ts"),
         maxcpus=params.get("maxcpus"),
     )
+
+
+@router.get("/{run_id}/monte-carlo")
+def get_wfo_monte_carlo(
+    run_id: int,
+    n_sims: int = 500,
+    session: Session = Depends(get_db),
+):
+    run = backtests_repo.get_by_id(session, run_id)
+    if run is None or run.run_type != "wfo":
+        raise HTTPException(status_code=404, detail="walkforward run not found")
+
+    from main_backtest import compute_wfo_combined
+    try:
+        combined = compute_wfo_combined(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Combined equity computation failed: {exc}")
+
+    trades = combined["trades"]
+    equity_pts = combined["equity"]   # [{ts: ISO string, value: float}]
+    initial_cash = float(combined["initial_cash"])
+    final_value = float(combined["final_value"])
+
+    def _to_unix(s: Any) -> int:
+        from datetime import datetime, timezone
+        if isinstance(s, str):
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        else:
+            dt = s
+        if getattr(dt, "tzinfo", None) is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+
+    # Build sorted equity floor-lookup: [(unix_ts, value), ...]
+    eq_pairs = sorted((_to_unix(e["ts"]), float(e["value"])) for e in equity_pts)
+
+    def _equity_at(unix_ts: int) -> float:
+        """Largest equity point with ts <= unix_ts (floor lookup)."""
+        lo, hi = 0, len(eq_pairs) - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if eq_pairs[mid][0] <= unix_ts:
+                lo = mid
+            else:
+                hi = mid - 1
+        return eq_pairs[lo][1]
+
+    # Sort trades by exit time to ensure monotonic timestamps.
+    trades_sorted = sorted(trades, key=lambda t: _to_unix(t["exit_ts"]))
+
+    # Derive equity deltas from the combined equity curve at each trade exit.
+    # This guarantees: sum(pnls) = final_value - initial_cash, so ALL MC paths
+    # (actual + every simulation) converge to the same final_value as the
+    # combined equity chart, correctly accounting for carry-over compounding.
+    timestamps: List[int] = []
+    equity_seq: List[float] = [eq_pairs[0][1]]  # t0 equity (= initial_cash)
+
+    for t in trades_sorted:
+        exit_unix = _to_unix(t["exit_ts"])
+        timestamps.append(exit_unix)
+        equity_seq.append(_equity_at(exit_unix))
+
+    # Force last equity point to match final_value exactly, closing any residual
+    # gap caused by open positions at the last bar after the last trade exit.
+    if len(equity_seq) > 1:
+        equity_seq[-1] = final_value
+
+    pnls = [equity_seq[i + 1] - equity_seq[i] for i in range(len(timestamps))]
+
+    # Downsample the full equity curve for the "Actual" line in the chart.
+    # This gives bar-level resolution (including inter-fold and intra-fold equity
+    # moves from open positions) instead of just trade-exit snapshots.
+    max_curve_pts = 600
+    stride = max(1, len(eq_pairs) // max_curve_pts)
+    equity_curve = [[ts, val] for ts, val in eq_pairs[::stride]]
+    if eq_pairs and list(eq_pairs[-1]) != equity_curve[-1]:
+        equity_curve.append(list(eq_pairs[-1]))
+
+    from backtest.monte_carlo import run_monte_carlo
+    result = run_monte_carlo(
+        pnls, initial_cash, n_sims=n_sims,
+        timestamps=timestamps if timestamps else None,
+        actual_equity=equity_seq,
+    )
+    return {**result, "initial_cash": initial_cash, "equity_curve": equity_curve}
 
 
 @router.get("/{run_id}/combined-equity")

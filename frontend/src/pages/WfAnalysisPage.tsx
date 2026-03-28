@@ -2,9 +2,11 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button, Group, Stack, Title, Table, Badge, Modal, Text, Loader, Progress, Tooltip } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import type { WfoSummary, WfoDetail, CreateWfoRequest, Strategy, CoinSummary } from "../api/types";
+import type { WfoSummary, WfoDetail, CreateWfoRequest, Strategy, CoinSummary, MonteCarloResult, TradeItem } from "../api/types";
 import CreateWfoModal from "../components/CreateWfoModal";
 import EquityChart from "../components/EquityChart";
+import MonteCarloChart from "../components/MonteCarloChart";
+import TradesTable from "../components/TradesTable";
 
 const TH = ({ tip, children }: { tip: string; children: React.ReactNode }) => (
   <Tooltip label={tip} withArrow position="top" multiline w={260}>
@@ -16,6 +18,8 @@ export default function WfAnalysisPage() {
   const [createModalOpened, setCreateModalOpened] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [combinedEquityRunId, setCombinedEquityRunId] = useState<number | null>(null);
+  const [wfoMcRunId, setWfoMcRunId] = useState<number | null>(null);
+  const [showCombinedTrades, setShowCombinedTrades] = useState(false);
   const qc = useQueryClient();
 
   // List WFO runs
@@ -66,7 +70,7 @@ export default function WfAnalysisPage() {
   });
 
   // Combined equity query (lazy — only runs when combinedEquityRunId is set)
-  const combinedEquityQuery = useQuery<{ equity: {ts: string; value: number}[]; baseline_equity: {ts: string; value: number}[]; trades: unknown[]; final_value: number; initial_cash: number }>({
+  const combinedEquityQuery = useQuery<{ equity: {ts: string; value: number}[]; baseline_equity: {ts: string; value: number}[]; trades: TradeItem[]; final_value: number; initial_cash: number }>({
     queryKey: ["wfo-combined-equity", combinedEquityRunId],
     queryFn: async () => {
       const res = await fetch(`/api/walkforwards/${combinedEquityRunId}/combined-equity`);
@@ -77,6 +81,21 @@ export default function WfAnalysisPage() {
       return res.json();
     },
     enabled: !!combinedEquityRunId,
+    staleTime: Infinity,
+  });
+
+  // WFO Monte Carlo query
+  const wfoMcQuery = useQuery<MonteCarloResult>({
+    queryKey: ["wfo-monte-carlo", wfoMcRunId],
+    queryFn: async () => {
+      const res = await fetch(`/api/walkforwards/${wfoMcRunId}/monte-carlo`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: "Unknown error" }));
+        throw new Error(err.detail || "Failed to compute Monte Carlo");
+      }
+      return res.json();
+    },
+    enabled: !!wfoMcRunId,
     staleTime: Infinity,
   });
 
@@ -183,7 +202,7 @@ export default function WfAnalysisPage() {
                   <Table.Td>{new Date(wfo.submitted_at).toLocaleString()}</Table.Td>
                   <Table.Td>{fmtElapsed(wfo.submitted_at, wfo.ended_at)}</Table.Td>
                   <Table.Td>
-                    <Button size="xs" variant="light" onClick={() => setSelectedRunId(wfo.run_id)}>
+                    <Button size="xs" variant="light" onClick={() => { setSelectedRunId(wfo.run_id); setCombinedEquityRunId(wfo.run_id); }}>
                       View Results
                     </Button>
                   </Table.Td>
@@ -207,7 +226,7 @@ export default function WfAnalysisPage() {
       {/* WFO Detail Modal */}
       <Modal
         opened={!!selectedRunId}
-        onClose={() => { setSelectedRunId(null); setCombinedEquityRunId(null); }}
+        onClose={() => { setSelectedRunId(null); setCombinedEquityRunId(null); setWfoMcRunId(null); }}
         title={`Walk-Forward Results - Run #${selectedRunId}`}
         size="95vw"
         styles={{ body: { padding: "12px 16px" } }}
@@ -261,21 +280,38 @@ export default function WfAnalysisPage() {
               )}
               {detailQuery.data.error && <Text size="xs" c="red">| {detailQuery.data.error}</Text>}
               {detailQuery.data.status === "succeeded" && detailQuery.data.total_folds > 0 && (
-                <Button
-                  size="xs"
-                  variant="light"
-                  color="teal"
-                  onClick={() => {
-                    if (combinedEquityRunId === selectedRunId) {
-                      setCombinedEquityRunId(null);
-                    } else {
-                      qc.removeQueries({ queryKey: ["wfo-combined-equity", selectedRunId] });
-                      setCombinedEquityRunId(selectedRunId);
-                    }
-                  }}
-                >
-                  {combinedEquityRunId === selectedRunId ? "Hide Combined Equity" : "Combined Equity"}
-                </Button>
+                <>
+                  <Button
+                    size="xs"
+                    variant="light"
+                    color="teal"
+                    onClick={() => {
+                      if (combinedEquityRunId === selectedRunId) {
+                        setCombinedEquityRunId(null);
+                      } else {
+                        qc.removeQueries({ queryKey: ["wfo-combined-equity", selectedRunId] });
+                        setCombinedEquityRunId(selectedRunId);
+                      }
+                    }}
+                  >
+                    {combinedEquityRunId === selectedRunId ? "Hide Combined Equity" : "Combined Equity"}
+                  </Button>
+                  <Button
+                    size="xs"
+                    variant="light"
+                    color="violet"
+                    onClick={() => {
+                      if (wfoMcRunId === selectedRunId) {
+                        setWfoMcRunId(null);
+                      } else {
+                        qc.removeQueries({ queryKey: ["wfo-monte-carlo", selectedRunId] });
+                        setWfoMcRunId(selectedRunId);
+                      }
+                    }}
+                  >
+                    {wfoMcRunId === selectedRunId ? "Hide Monte Carlo" : "Monte Carlo"}
+                  </Button>
+                </>
               )}
             </Group>
 
@@ -298,6 +334,10 @@ export default function WfAnalysisPage() {
                       <Text size="xs"><Text span c="dimmed">Initial:</Text> {fmtDollar(combinedEquityQuery.data.initial_cash)}</Text>
                       <Text size="xs"><Text span c="dimmed">Final:</Text> <Text span fw={700} c={combinedEquityQuery.data.final_value >= combinedEquityQuery.data.initial_cash ? "green" : "red"}>{fmtDollar(combinedEquityQuery.data.final_value)}</Text></Text>
                       <Text size="xs"><Text span c="dimmed">Return:</Text> {fmt((combinedEquityQuery.data.final_value / combinedEquityQuery.data.initial_cash - 1) * 100)}%</Text>
+                      <Text size="xs"><Text span c="dimmed">Trades:</Text> {combinedEquityQuery.data.trades.length}</Text>
+                      <Button size="xs" variant="subtle" color="gray" onClick={() => setShowCombinedTrades((v) => !v)}>
+                        {showCombinedTrades ? "Hide Trades" : "Show Trades"}
+                      </Button>
                     </Group>
                     <EquityChart key={combinedEquityQuery.data.equity.length} equity={combinedEquityQuery.data.equity} baselineEquity={combinedEquityQuery.data.baseline_equity} initialCash={combinedEquityQuery.data.initial_cash} />
                     {combinedEquityQuery.data.equity.length > 0 && (
@@ -305,6 +345,61 @@ export default function WfAnalysisPage() {
                         {combinedEquityQuery.data.equity.length} pts &nbsp;|&nbsp; {combinedEquityQuery.data.equity[0].ts.slice(0, 10)} → {combinedEquityQuery.data.equity[combinedEquityQuery.data.equity.length - 1].ts.slice(0, 10)}
                       </Text>
                     )}
+                    {showCombinedTrades && combinedEquityQuery.data.trades.length > 0 && (
+                      <div style={{ marginTop: 8 }}>
+                        <TradesTable trades={combinedEquityQuery.data.trades} />
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* WFO Monte Carlo chart */}
+            {wfoMcRunId === selectedRunId && (
+              <div style={{ background: "var(--mantine-color-dark-6, #f8f9fa)", padding: "8px 12px", borderRadius: "6px" }}>
+                <Text size="sm" fw={600} mb={6}>Monte Carlo — Trade Sequence Shuffling</Text>
+                {wfoMcQuery.isFetching && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "20px 0" }}>
+                    <Loader size="sm" />
+                    <Text size="xs" c="dimmed">Running simulations…</Text>
+                  </div>
+                )}
+                {wfoMcQuery.error && (
+                  <Text size="xs" c="red">{(wfoMcQuery.error as Error).message}</Text>
+                )}
+                {wfoMcQuery.data && (
+                  <>
+                    <Text size="xs" c="dimmed" mb={6}>
+                      {wfoMcQuery.data.n_sims} simulations · {wfoMcQuery.data.n_trades} trades
+                    </Text>
+                    <MonteCarloChart key={wfoMcRunId} data={wfoMcQuery.data} />
+                    <Group gap="xl" mt={6} style={{ fontSize: "12px" }}>
+                      <span style={{ color: "#3b82f6" }}>— Actual</span>
+                      <span style={{ color: "#f59e0b" }}>— Median (P50)</span>
+                      <span style={{ color: "#4b5563" }}>— P25/P75</span>
+                      <span style={{ color: "#374151" }}>— P5/P95</span>
+                    </Group>
+                    <Text size="xs" c="dimmed" mt={4}>
+                      Max Drawdown distribution across {wfoMcQuery.data.n_sims} shuffled simulations — lower is better
+                    </Text>
+                    <Group gap="sm" mt={8}>
+                      {[
+                        { label: "Best 5% (P5 DD)", val: wfoMcQuery.data.dd_p5 },
+                        { label: "P25 DD", val: wfoMcQuery.data.dd_p25 },
+                        { label: "Median DD", val: wfoMcQuery.data.dd_p50 },
+                        { label: "P75 DD", val: wfoMcQuery.data.dd_p75 },
+                        { label: "Worst 5% (P95 DD)", val: wfoMcQuery.data.dd_p95 },
+                        { label: "Actual Max DD", val: wfoMcQuery.data.dd_actual },
+                      ].map(({ label, val }) => (
+                        <div key={label} style={{ background: "#111827", borderRadius: "6px", padding: "6px 10px", border: "1px solid #374151" }}>
+                          <div style={{ fontSize: "11px", color: "#9ca3af", marginBottom: "2px" }}>{label}</div>
+                          <div style={{ fontSize: "14px", fontWeight: "bold", color: val < 10 ? "#4ade80" : val < 20 ? "#f59e0b" : "#f87171" }}>
+                            {val.toFixed(1)}%
+                          </div>
+                        </div>
+                      ))}
+                    </Group>
                   </>
                 )}
               </div>
@@ -346,7 +441,9 @@ export default function WfAnalysisPage() {
                     <TH tip="Maximum Drawdown during the test period (%)">Test Max DD</TH>
                     <TH tip="Win rate on test period trades (%)">Test Win Rate</TH>
                     <TH tip="Profit Factor on test period: gross profit / gross loss">Test PF</TH>
-                    <TH tip="Total number of closed trades during the test period">Test Trades</TH>
+                    <TH tip="Test period trades: Won / Lost / Total closed">Test W/L/T</TH>
+                    <TH tip="Average Maximum Adverse Excursion per trade in this fold (dollar amount of worst intra-trade drawdown)">Avg MAE</TH>
+                    <TH tip="Average Maximum Favorable Excursion per trade in this fold (dollar amount of best unrealized gain during trade)">Avg MFE</TH>
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
@@ -355,6 +452,23 @@ export default function WfAnalysisPage() {
                     const cash = detailQuery.data.cash ?? 10000;
                     const finalVal = m.final as number | undefined;
                     const isProfitable = finalVal != null && finalVal > cash;
+
+                    // Compute per-fold MAE/MFE from combined trades
+                    const foldTrades = combinedEquityQuery.data?.trades.filter((t) => {
+                      const exitTs = new Date(t.exit_ts).getTime();
+                      const testStart = new Date(fold.test_start).getTime();
+                      const testEnd = new Date(fold.test_end).getTime();
+                      return exitTs >= testStart && exitTs <= testEnd;
+                    }) ?? [];
+                    const tradesWithMae = foldTrades.filter((t) => t.mae != null);
+                    const tradesWithMfe = foldTrades.filter((t) => t.mfe != null);
+                    const avgMae = tradesWithMae.length > 0
+                      ? tradesWithMae.reduce((s, t) => s + (t.mae ?? 0), 0) / tradesWithMae.length
+                      : null;
+                    const avgMfe = tradesWithMfe.length > 0
+                      ? tradesWithMfe.reduce((s, t) => s + (t.mfe ?? 0), 0) / tradesWithMfe.length
+                      : null;
+
                     return (
                       <Table.Tr key={fold.id}>
                         <Table.Td>#{fold.fold_index}</Table.Td>
@@ -379,7 +493,23 @@ export default function WfAnalysisPage() {
                         <Table.Td>{fmtPct(m.maxdd as number | undefined)}</Table.Td>
                         <Table.Td>{fmtPct(m.winrate as number | undefined)}</Table.Td>
                         <Table.Td>{fmt(m.pf as number | undefined)}</Table.Td>
-                        <Table.Td>{(m.total_closed as number) ?? "—"}</Table.Td>
+                        <Table.Td>
+                          {m.won !== undefined || m.lost !== undefined || m.closed !== undefined ? (
+                            <Text size="xs" style={{ whiteSpace: "nowrap", fontFamily: "monospace" }}>
+                              <Text span c="green">{(m.won as number) ?? 0}</Text>
+                              {" / "}
+                              <Text span c="red">{(m.lost as number) ?? 0}</Text>
+                              {" / "}
+                              <Text span>{(m.closed as number) ?? 0}</Text>
+                            </Text>
+                          ) : "—"}
+                        </Table.Td>
+                        <Table.Td>
+                          <Text size="xs" c="red">{avgMae != null ? `$${avgMae.toFixed(2)}` : "—"}</Text>
+                        </Table.Td>
+                        <Table.Td>
+                          <Text size="xs" c="green">{avgMfe != null ? `$${avgMfe.toFixed(2)}` : "—"}</Text>
+                        </Table.Td>
                       </Table.Tr>
                     );
                   })}
