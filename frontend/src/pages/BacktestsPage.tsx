@@ -1,4 +1,4 @@
-import { Button, Card, Group, Modal, Stack, Text, Title, Table, Select, Checkbox } from "@mantine/core";
+import { Button, Card, Group, Modal, Stack, Text, Title, Table, Select, Checkbox, Tooltip } from "@mantine/core";
 import { DateTimePicker } from "@mantine/dates";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -328,13 +328,13 @@ export default function BacktestsPage() {
                   <Table.Th>End</Table.Th>
                   <Table.Th>Status</Table.Th>
                   <Table.Th>Progress</Table.Th>
-                  <Table.Th>Final</Table.Th>
-                  <Table.Th>Buy&Hold</Table.Th>
-                  <Table.Th>Edge</Table.Th>
-                  <Table.Th>Sharpe</Table.Th>
-                  <Table.Th>MaxDD</Table.Th>
-                  <Table.Th>Trades</Table.Th>
-                  <Table.Th>Win rate</Table.Th>
+                  <Tooltip label="Final portfolio value (cash + open positions)" position="top" withArrow><Table.Th style={{ cursor: "help" }}>Final</Table.Th></Tooltip>
+                  <Tooltip label="Buy & Hold baseline: same cash, held the asset for the full period" position="top" withArrow><Table.Th style={{ cursor: "help" }}>Buy&Hold</Table.Th></Tooltip>
+                  <Tooltip label="Edge over Buy & Hold — strategy final value minus B&H final value" position="top" withArrow><Table.Th style={{ cursor: "help" }}>Edge</Table.Th></Tooltip>
+                  <Tooltip label="Sharpe Ratio — risk-adjusted return (higher is better, >1 is good)" position="top" withArrow><Table.Th style={{ cursor: "help" }}>Sharpe</Table.Th></Tooltip>
+                  <Tooltip label="Maximum Drawdown — largest peak-to-trough drop during the period (lower is better)" position="top" withArrow><Table.Th style={{ cursor: "help" }}>MaxDD</Table.Th></Tooltip>
+                  <Tooltip label="Total number of closed trades" position="top" withArrow><Table.Th style={{ cursor: "help" }}>Trades</Table.Th></Tooltip>
+                  <Tooltip label="Win Rate — percentage of profitable trades" position="top" withArrow><Table.Th style={{ cursor: "help" }}>Win rate</Table.Th></Tooltip>
                   <Table.Th>Actions</Table.Th>
                 </Table.Tr>
               </Table.Thead>

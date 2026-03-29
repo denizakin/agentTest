@@ -39,7 +39,8 @@ export default function BacktestResults({ results, runId, chartRef }: Props) {
       return res.json();
     },
     enabled: activeTab === "montecarlo",
-    staleTime: Infinity,
+    staleTime: 0,
+    gcTime: 0,
   });
 
   // Find main and baseline results

@@ -1,9 +1,10 @@
-"""CLI: Build materialized views for the latest top-N CMC symbols.
+"""CLI: Build candles schema aggregation tables for the latest top-N CMC symbols.
 
 Workflow:
 - Assumes `cmc_market_caps` already populated (e.g., via main_cmc_market_caps.py).
 - Reads the latest snapshot, takes top-N by market cap, drops stablecoins,
-  and creates mv_candlesticks_<symbol>_<tf> for each timeframe bucket.
+  and creates candles.candlesticks_<symbol>_<tf> tables for each timeframe bucket.
+- Registers each table in candles.refresh_state for incremental refresh.
 
 Example:
     python src/main_cmc_build_mviews.py --limit 100 --tfs 5m,15m,1h,4h,1d,1w,1mo
@@ -98,41 +99,36 @@ def build_mviews(limit: int, tfs: Sequence[str], echo: bool = False) -> int:
             sym_up = str(sym).upper()
             sym_low = sym_up.lower()
             inst_id = f"{sym_up}-USDT"
-            inst_lit = inst_id.replace("'", "''")
 
             for tf in selected_tfs:
                 bucket_expr = buckets[tf]
-                view_name = f"mv_candlesticks_{sym_low}_{tf}"
-                idx_name = f"ix_mv_candles_{sym_low}_{tf}_ts"
-                sql = f"""
-                CREATE MATERIALIZED VIEW IF NOT EXISTS {view_name} AS
-                WITH bucketed AS (
-                    SELECT
-                        ({bucket_expr}) AS bucket_ts,
-                        ts,
-                        open,
-                        high,
-                        low,
-                        close,
-                        volume
-                    FROM candlesticks
-                    WHERE instrument_id = '{inst_lit}'
-                )
-                SELECT
-                    bucket_ts AS ts,
-                    '{inst_lit}'::varchar(30)                AS instrument_id,
-                    (array_agg(open  ORDER BY ts ASC))[1]  AS open,
-                    max(high)                              AS high,
-                    min(low)                               AS low,
-                    (array_agg(close ORDER BY ts DESC))[1] AS close,
-                    sum(volume)                            AS volume
-                FROM bucketed
-                GROUP BY bucket_ts
-                ORDER BY bucket_ts;
-                """
-                conn.execute(text(sql))
-                conn.execute(text(f"CREATE UNIQUE INDEX IF NOT EXISTS {idx_name} ON {view_name} (ts);"))
-                print(f"Created {view_name}")
+                table_name = f"candlesticks_{sym_low}_{tf}"
+
+                # Create table in candles schema
+                conn.execute(text(f"""
+                    CREATE TABLE IF NOT EXISTS candles.{table_name} (
+                        ts            TIMESTAMPTZ  NOT NULL,
+                        instrument_id VARCHAR(30)  NOT NULL,
+                        open          NUMERIC      NOT NULL,
+                        high          NUMERIC      NOT NULL,
+                        low           NUMERIC      NOT NULL,
+                        close         NUMERIC      NOT NULL,
+                        volume        NUMERIC      NOT NULL
+                    )
+                """))
+                conn.execute(text(f"""
+                    CREATE UNIQUE INDEX IF NOT EXISTS uix_{table_name}_inst_ts
+                    ON candles.{table_name} (instrument_id, ts)
+                """))
+
+                # Register in refresh_state (skip if already registered)
+                conn.execute(text("""
+                    INSERT INTO candles.refresh_state (table_name, instrument_id, bucket_expr, last_source_ts)
+                    VALUES (:table_name, :instrument_id, :bucket_expr, NULL)
+                    ON CONFLICT (table_name) DO NOTHING
+                """), {"table_name": table_name, "instrument_id": inst_id, "bucket_expr": bucket_expr})
+
+                print(f"Created candles.{table_name}")
 
     return 0
 

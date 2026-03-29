@@ -100,45 +100,76 @@ def _parse_time_to_ms(value: Optional[str]) -> Optional[int]:
     return int(dt.timestamp() * 1000)
 
 
-def _mv_name(inst: str, bar: str) -> str:
-    inst_slug = inst.lower().replace("-", "_")
+_BUCKET_EXPRS = {
+    "5m":  "date_trunc('hour', ts) + (((extract(minute from ts)::int) / 5) * 5) * interval '1 minute'",
+    "15m": "date_trunc('hour', ts) + (((extract(minute from ts)::int) / 15) * 15) * interval '1 minute'",
+    "1h":  "date_trunc('hour', ts)",
+    "4h":  "date_trunc('day', ts) + (((extract(hour from ts)::int) / 4) * 4) * interval '1 hour'",
+    "1d":  "date_trunc('day', ts)",
+    "1w":  "date_trunc('week', ts)",
+    "1mo": "date_trunc('month', ts)",
+}
+
+
+def _candles_table_name(inst: str, bar: str) -> Optional[str]:
+    """Return candles schema table name for the given instrument/bar, or None for 1m."""
     bar_slug = bar.lower()
-    return f"mv_candlesticks_{inst_slug}_{bar_slug}"
+    if bar_slug == "1m":
+        return None
+    # Extract coin symbol: BTC-USDT → btc
+    coin = inst.split("-")[0].lower()
+    return f"candlesticks_{coin}_{bar_slug}"
+
+
+def _ensure_candles_table(conn, table_name: str, inst: str, bar: str) -> None:
+    """Create candles table and refresh_state entry if they don't exist yet."""
+    bucket_expr = _BUCKET_EXPRS.get(bar.lower())
+    if bucket_expr is None:
+        return
+    conn.execute(text(f"""
+        CREATE TABLE IF NOT EXISTS candles.{table_name} (
+            ts            TIMESTAMPTZ  NOT NULL,
+            instrument_id VARCHAR(30)  NOT NULL,
+            open          NUMERIC      NOT NULL,
+            high          NUMERIC      NOT NULL,
+            low           NUMERIC      NOT NULL,
+            close         NUMERIC      NOT NULL,
+            volume        NUMERIC      NOT NULL
+        )
+    """))
+    conn.execute(text(f"""
+        CREATE UNIQUE INDEX IF NOT EXISTS uix_{table_name}_inst_ts
+        ON candles.{table_name} (instrument_id, ts)
+    """))
+    conn.execute(text("""
+        INSERT INTO candles.refresh_state (table_name, instrument_id, bucket_expr, last_source_ts)
+        VALUES (:table_name, :instrument_id, :bucket_expr, NULL)
+        ON CONFLICT (table_name) DO NOTHING
+    """), {"table_name": table_name, "instrument_id": inst, "bucket_expr": bucket_expr})
 
 
 def ensure_and_refresh_mv(db: DbConn, inst: str, bar: str) -> None:
-    """Create (if missing) and refresh a per-instrument MV for the ingested instrument/timeframe."""
-    view = _mv_name(inst, bar)
-    create_sql = f"""
-        CREATE MATERIALIZED VIEW IF NOT EXISTS {view} AS
-        SELECT ts, instrument_id, open, high, low, close, volume
-        FROM candlesticks
-        WHERE instrument_id = :inst
-        ORDER BY ts ASC;
-    """
-    idx_sql = f"CREATE INDEX IF NOT EXISTS ix_{view}_ts ON {view}(ts);"
-    refresh_sql = f"REFRESH MATERIALIZED VIEW CONCURRENTLY {view};"
-    refresh_fallback_sql = f"REFRESH MATERIALIZED VIEW {view};"
+    """Create (if needed) and incrementally refresh the candles schema table."""
+    table_name = _candles_table_name(inst, bar)
+    if table_name is None:
+        return  # 1m uses raw candlesticks, no aggregation table
 
-    with db.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+    with db.engine.connect() as conn:
         try:
-            conn.execute(text(create_sql), {"inst": inst})
-            conn.execute(text(idx_sql))
-            try:
-                conn.execute(text(refresh_sql))
-            except Exception:
-                # Fall back to non-concurrent refresh if concurrent not possible
-                conn.execute(text(refresh_fallback_sql))
-            print(f"Materialized view refreshed: {view}")
+            _ensure_candles_table(conn, table_name, inst, bar)
+            conn.execute(text("SELECT candles.refresh_incremental(:t)"), {"t": table_name})
+            conn.commit()
+            print(f"Candles table refreshed: candles.{table_name}")
         except Exception as exc:
-            print(f"MV refresh failed for {view}: {exc}")
+            conn.rollback()
+            print(f"Candles refresh failed for {table_name}: {exc}")
 
 
-DEFAULT_MV_BARS = ["1m", "5m", "15m", "1h", "4h", "1d", "1w", "1mo"]
+DEFAULT_MV_BARS = ["5m", "15m", "1h", "4h", "1d", "1w", "1mo"]
 
 
 def ensure_and_refresh_mv_multi(db: DbConn, inst: str, bars: Optional[list[str]] = None) -> None:
-    """Refresh a predefined set of MVs for an instrument."""
+    """Refresh candles tables for a predefined set of bars for an instrument."""
     targets = bars or DEFAULT_MV_BARS
     for b in targets:
         ensure_and_refresh_mv(db, inst, b)

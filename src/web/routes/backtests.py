@@ -300,7 +300,8 @@ def get_backtest_monte_carlo(
 
     all_trades = runtrades_repo.list_trades(session, run_id)
     valid_trades = [t for t in all_trades if t.exit_ts]
-    pnls = [float(t.pnl) for t in valid_trades]
+    # Use net PnL (gross - commission) so MC "actual" matches the real backtest result
+    pnls = [float(t.pnl) - float(t.commission or 0) for t in valid_trades]
     timestamps = [int(t.exit_ts.timestamp()) for t in valid_trades]
 
     initial_cash = float(run.cash) if run.cash else 10000.0
@@ -346,7 +347,7 @@ def _mv_name(inst: str, tf: str) -> str:
         coin = inst_lower.split("-")[0]
     else:
         coin = inst_lower
-    return f"mv_candlesticks_{coin}_{tf_norm}"
+    return f"candles.candlesticks_{coin}_{tf_norm}"
 
 
 @router.get("/{run_id}/chart", response_model=ChartResponse)

@@ -1,16 +1,22 @@
-"""CLI: Refresh materialized views for BTC/ETH timeframes.
+"""CLI: Incrementally refresh candles schema tables.
+
+Calls candles.refresh_incremental() for each matching table in candles.refresh_state.
 
 Examples:
-  # Refresh all BTC & ETH views concurrently
+  # Refresh all candles tables
   python src/main_refresh_mviews.py
 
-  # Refresh only BTC 5m,15m blocking
-  python src/main_refresh_mviews.py --inst btc --tfs 5m,15m --blocking
+  # Refresh only BTC tables
+  python src/main_refresh_mviews.py --inst btc
+
+  # Refresh BTC 5m and 15m
+  python src/main_refresh_mviews.py --inst btc --tfs 5m,15m
 """
 from __future__ import annotations
 
 import argparse
-from typing import Iterable, List, Sequence, Tuple
+import re
+from typing import List, Optional, Sequence, Tuple
 
 from sqlalchemy import text
 
@@ -19,42 +25,37 @@ from db.db_conn import DbConn
 
 
 SUPPORTED_TFS: Tuple[str, ...] = ("5m", "15m", "1h", "4h", "1d", "1w", "1mo")
-ORDERED_TFS: Tuple[str, ...] = ("5m", "15m", "1h", "4h", "1d", "1w", "1mo")
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Refresh candle materialized views")
+    p = argparse.ArgumentParser(description="Refresh candles schema tables incrementally")
     p.add_argument(
         "--inst",
-        default="both",
-        choices=["btc", "eth", "both"],
-        help="Which instrument views to refresh",
+        default=None,
+        help="Coin symbol to refresh (e.g. btc, eth). If omitted, refreshes all instruments.",
     )
     p.add_argument(
         "--tfs",
-        default=",".join(ORDERED_TFS),
-        help=f"Comma-separated timeframes to refresh. Supported: {','.join(SUPPORTED_TFS)}",
+        default=None,
+        help=f"Comma-separated timeframes to refresh. Supported: {','.join(SUPPORTED_TFS)}. If omitted, refreshes all.",
     )
-    p.add_argument("--blocking", action="store_true", help="Use blocking REFRESH (faster, but locks reads)")
     p.add_argument("--echo", action="store_true", help="Enable SQLAlchemy engine echo")
     return p.parse_args()
 
 
-def _mv_names(inst_opt: str, tfs: Sequence[str]) -> List[str]:
-    insts: Iterable[str]
-    if inst_opt == "both":
-        insts = ("btc", "eth")
-    else:
-        insts = (inst_opt,)
+def _select_tables(conn, inst: Optional[str], tfs: Optional[Sequence[str]]) -> List[str]:
+    """Return table names from candles.refresh_state matching the filters."""
+    rows = conn.execute(text("SELECT table_name FROM candles.refresh_state ORDER BY table_name")).fetchall()
+    names = [r[0] for r in rows]
 
-    # Keep timeframes in canonical order but filter by requested
-    requested = {tf.strip().lower() for tf in tfs}
-    ordered = [tf for tf in ORDERED_TFS if tf in requested]
+    if inst:
+        coin = inst.strip().lower()
+        names = [n for n in names if re.match(rf"^candlesticks_{re.escape(coin)}_", n)]
 
-    names: List[str] = []
-    for inst in insts:
-        for tf in ordered:
-            names.append(f"mv_candlesticks_{inst}_{tf}")
+    if tfs:
+        tf_set = {t.strip().lower() for t in tfs}
+        names = [n for n in names if n.rsplit("_", 1)[-1] in tf_set]
+
     return names
 
 
@@ -63,25 +64,25 @@ def main() -> int:
     load_env_file()
     db = DbConn(echo=args.echo)
 
-    tfs = [s for s in (args.tfs.split(",") if args.tfs else []) if s]
-    unknown = [tf for tf in tfs if tf not in SUPPORTED_TFS]
-    if unknown:
-        print(f"Unsupported timeframes: {unknown}. Supported: {list(SUPPORTED_TFS)}")
-        return 2
+    tfs: Optional[List[str]] = None
+    if args.tfs:
+        tfs = [s.strip().lower() for s in args.tfs.split(",") if s.strip()]
+        unknown = [t for t in tfs if t not in SUPPORTED_TFS]
+        if unknown:
+            print(f"Unsupported timeframes: {unknown}. Supported: {list(SUPPORTED_TFS)}")
+            return 2
 
-    names = _mv_names(args.inst, tfs)
-    if not names:
-        print("No materialized views selected to refresh.")
-        return 0
+    with db.engine.connect() as conn:
+        tables = _select_tables(conn, args.inst, tfs)
+        if not tables:
+            print("No candles tables matched the given filters.")
+            return 0
 
-    cmd = "REFRESH MATERIALIZED VIEW CONCURRENTLY {}" if not args.blocking else "REFRESH MATERIALIZED VIEW {}"
-
-    # CONCURRENTLY must run outside a transaction; use AUTOCOMMIT for both modes for simplicity.
-    with db.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-        for name in names:
+        for table_name in tables:
+            print(f"Refreshing candles.{table_name} ...", end=" ", flush=True)
             try:
-                print(f"Refreshing {name} ({'concurrent' if not args.blocking else 'blocking'}) ...", end=" ")
-                conn.execute(text(cmd.format(name)))
+                conn.execute(text("SELECT candles.refresh_incremental(:t)"), {"t": table_name})
+                conn.commit()
                 print("ok")
             except Exception as exc:
                 print(f"failed: {exc}")
@@ -92,4 +93,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

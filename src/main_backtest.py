@@ -54,9 +54,10 @@ def _parse_time(value: Optional[str]) -> Optional[datetime]:
         raise ValueError(f"Unsupported time format: {value}")
 
 
-def _tf_to_view(inst: str, tf: str) -> Optional[str]:
+def _tf_to_table(inst: str, tf: str) -> Optional[str]:
     """
-    Map instrument/timeframe to a preferred MV name.
+    Map instrument/timeframe to the candles schema table name.
+    Returns None for 1m (queries raw candlesticks directly).
     """
     tf_norm = tf.lower()
     if tf_norm == "1m":
@@ -72,11 +73,11 @@ def _tf_to_view(inst: str, tf: str) -> Optional[str]:
     else:
         coin = inst_lower
 
-    return f"mv_candlesticks_{coin}_{tf_norm}"
+    return f"candles.candlesticks_{coin}_{tf_norm}"
 
 
 def _fetch_df(db: DbConn, inst: str, tf: str, since: Optional[datetime], until: Optional[datetime], view: Optional[str] = None) -> pd.DataFrame:
-    view = view or _tf_to_view(inst, tf)
+    view = view or _tf_to_table(inst, tf)
     if view is None:
         sql = "SELECT ts, open, high, low, close, volume FROM candlesticks"
         where_clauses = ["instrument_id = :inst"]
@@ -339,11 +340,13 @@ def run_backtest(inst: str, tf: str, since: Optional[str], until: Optional[str],
     since_dt = _parse_time(since)
     until_dt = _parse_time(until)
 
-    # Optional: refresh MV before fetch
-    view = _tf_to_view(inst, tf)
+    # Optional: refresh candles table before fetch
+    view = _tf_to_table(inst, tf)
     if refresh and view is not None:
-        with db.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-            conn.execute(text(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {view}"))
+        table_name = view.split(".")[-1]  # strip schema prefix for procedure call
+        with db.engine.connect() as conn:
+            conn.execute(text("SELECT candles.refresh_incremental(:t)"), {"t": table_name})
+            conn.commit()
 
     df = _fetch_df(db, inst, tf, since_dt, until_dt, view=view)
     if df.empty:
@@ -762,12 +765,13 @@ def run_optimize(inst: str, tf: str, since: Optional[str], until: Optional[str],
     since_dt = _parse_time(since)
     until_dt = _parse_time(until)
 
-    view = _tf_to_view(inst, tf)
+    view = _tf_to_table(inst, tf)
     if view is not None:
-        with db.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-            # Do not block if MV not present; ignore errors
+        table_name = view.split(".")[-1]
+        with db.engine.connect() as conn:
             try:
-                conn.execute(text(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {view}"))
+                conn.execute(text("SELECT candles.refresh_incremental(:t)"), {"t": table_name})
+                conn.commit()
             except Exception:
                 pass
 
@@ -1071,11 +1075,13 @@ def run_wfo(inst: str, tf: str, since: Optional[str], until: Optional[str], cash
     since_dt = _parse_time(since)
     until_dt = _parse_time(until)
 
-    view = _tf_to_view(inst, tf)
+    view = _tf_to_table(inst, tf)
     if view is not None:
-        with db.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        table_name = view.split(".")[-1]
+        with db.engine.connect() as conn:
             try:
-                conn.execute(text(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {view}"))
+                conn.execute(text("SELECT candles.refresh_incremental(:t)"), {"t": table_name})
+                conn.commit()
             except Exception:
                 pass
 

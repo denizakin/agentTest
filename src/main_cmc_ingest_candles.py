@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="CMC -> OKX candlestick ingester for top market cap assets")
     p.add_argument("--limit", type=int, default=100, help="How many top assets to pull from cmc_market_caps")
     p.add_argument("--bar", default="1m", help="OKX candle granularity (e.g., 1m, 1h, 1d)")
-    p.add_argument("--per-req", dest="per_req", type=int, default=300, help="Rows per OKX request (<=300)")
+    p.add_argument("--per-req", dest="per_req", type=int, default=300, help="Rows per OKX request (OKX API max is 300; higher values are capped)")
     p.add_argument(
         "--max-rows",
         dest="max_rows",
@@ -228,12 +228,12 @@ def main() -> int:
             )
             session.commit()
             print(f"  [{inst_id}] done, upserted {upserted} rows.")
-            if args.refresh_mv:
+            if args.refresh_mv and upserted > 0:
                 try:
-                    print(f"  [{inst_id}] refreshing MVs for bars={DEFAULT_MV_BARS} ...")
+                    print(f"  [{inst_id}] refreshing candles tables for bars={DEFAULT_MV_BARS} ...")
                     ensure_and_refresh_mv_multi(db, inst_id, DEFAULT_MV_BARS)
                 except Exception as exc:
-                    print(f"  [{inst_id}] MV refresh failed: {exc}")
+                    print(f"  [{inst_id}] candles refresh failed: {exc}")
 
     run_finished = datetime.now(timezone.utc)
     duration = run_finished - run_started
